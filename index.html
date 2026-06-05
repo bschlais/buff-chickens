@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Buff Chickens</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="game-container">
+    <canvas id="gameCanvas"></canvas>
+
+    <div id="hud">
+        <div id="day-display">
+            <span id="day-label">Day 1 / 100</span>
+            <div id="day-bar-bg"><div id="day-bar-fill"></div></div>
+        </div>
+        <div id="hp-row">
+            <div id="hp-bar-bg"><div id="hp-bar-fill"></div></div>
+            <span id="hp-text">100/100</span>
+        </div>
+        <div id="rune-row">
+            <span class="rune air-r">💨<span id="r-air">0</span></span>
+            <span class="rune earth-r">🪨<span id="r-earth">0</span></span>
+            <span class="rune water-r">💧<span id="r-water">0</span></span>
+            <span class="rune fire-r">🔥<span id="r-fire">0</span></span>
+            <span class="rune buff-r">💪<span id="r-buff">0</span></span>
+            <span class="rune sand-r">🏖️<span id="r-sand">0</span></span>
+            <span class="rune rock-r">⛰️<span id="r-rock">0</span></span>
+            <span class="rune lava-r">🌋<span id="r-lava">0</span></span>
+        </div>
+        <div id="chicken-row">🐔<span id="chk-count">30</span> | 🥚<span id="egg-count">0</span></div>
+        <div id="area-row">📍<span id="area-name">The Farm</span></div>
+    </div>
+
+    <div id="msg-box"></div>
+    <div id="controls-bar">WASD:Move | Click/F:Attack | E:Feed/Interact | Z:Sleep | C:Chickens | S:Save | L:Load | M:Map</div>
+
+    <!-- Panels -->
+    <div id="chicken-panel" class="side-panel hidden">
+        <div class="panel-header">🐔 Your Chickens <button onclick="Game.closeChickenPanel()">✕</button></div>
+        <div id="chicken-list"></div>
+    </div>
+    <div id="feed-panel" class="dialog hidden">
+        <div class="panel-header" id="feed-title">Feed a Rune</div>
+        <p id="feed-desc"></p>
+        <div id="feed-options"></div>
+        <button onclick="Game.closeFeedPanel()">Cancel</button>
+    </div>
+    <div id="minimap-panel" class="hidden">
+        <canvas id="minimapCanvas" width="200" height="200"></canvas>
+    </div>
+
+    <!-- Screens -->
+    <div id="start-screen" class="screen">
+        <div class="screen-box">
+            <h1>🐔 Buff Chickens 🐔</h1>
+            <p class="story">You've been hired to watch Farmer Jim's farm for <strong>100 days</strong> while he's away.</p>
+            <p class="story">But on the first morning, the chickens gather around you...</p>
+            <div class="speech-bubble">
+                "Farmer Jim is going to <strong>EAT US</strong> when he gets back!<br>
+                Find the magical runes hidden around the farm,<br>
+                build our army, and <strong>defeat him on Day 100!</strong>"
+            </div>
+            <div class="btn-row">
+                <button class="btn-primary" onclick="Game.start()">🌟 Begin Quest!</button>
+                <button class="btn-secondary" onclick="Game.load()">💾 Load Game</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="boss-screen" class="screen hidden">
+        <div class="screen-box boss-box">
+            <h1>⚠️ DAY 100 ⚠️</h1>
+            <p style="font-size:1.3em;color:#ff4400">FARMER JIM HAS RETURNED!</p>
+            <p>The sky turns blood red...</p>
+            <p style="font-size:2em">👁️</p>
+            <p>"WHO... ATE... MY... CHICKENS?!?!"</p>
+            <button class="btn-primary" onclick="Game.startBoss()">FACE YOUR DESTINY!</button>
+        </div>
+    </div>
+
+    <div id="victory-screen" class="screen hidden">
+        <div class="screen-box victory-box">
+            <h1>🏆 VICTORY! 🏆</h1>
+            <p>You defeated Farmer Jim and saved all the chickens!</p>
+            <canvas id="victory-canvas" width="600" height="220"></canvas>
+            <h2 style="color:#ffd700;margin-top:10px">THE BUFF CHICKEN CELEBRATES!</h2>
+            <button class="btn-primary" onclick="location.reload()">Play Again</button>
+        </div>
+    </div>
+
+    <div id="gameover-screen" class="screen hidden">
+        <div class="screen-box">
+            <h1>💀 GAME OVER 💀</h1>
+            <p id="go-text"></p>
+            <button class="btn-primary" onclick="location.reload()">Try Again</button>
+        </div>
+    </div>
+</div>
+<script src="js/game.js"></script>
+</body>
+</html>
