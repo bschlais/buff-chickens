@@ -67,10 +67,10 @@ const RUNE_COLORS = {
 const RUNE_EMOJI = { air:'💨',earth:'🪨',water:'💧',fire:'🔥',buff:'💪',sand:'🏖️',rock:'⛰️',lava:'🌋' };
 
 const CHK_XFORM = {
-  air:  { color:0xc8f0ff, label:'Air Chicken',   baseDmg:12, baseSpd:0.12, atkR:10, proj:true  },
-  earth:{ color:0xb8a060, label:'Earth Chicken', baseDmg:20, baseSpd:0.07, atkR:2.5,proj:false },
-  water:{ color:0x6699ff, label:'Water Chicken', baseDmg:14, baseSpd:0.10, atkR:12, proj:true  },
-  fire: { color:0xff6622, label:'Fire Chicken',  baseDmg:18, baseSpd:0.09, atkR:10, proj:true  },
+  air:  { color:0xc8f0ff, label:'Air Chicken',   baseDmg:12, baseSpd:0.26, atkR:10, proj:true  },
+  earth:{ color:0xb8a060, label:'Earth Chicken', baseDmg:20, baseSpd:0.18, atkR:2.5,proj:false },
+  water:{ color:0x6699ff, label:'Water Chicken', baseDmg:14, baseSpd:0.24, atkR:12, proj:true  },
+  fire: { color:0xff6622, label:'Fire Chicken',  baseDmg:18, baseSpd:0.22, atkR:10, proj:true  },
 };
 
 const ENEMY_DEFS = {
@@ -374,6 +374,16 @@ function makeEggMesh() {
   const e = M(sphG(0.18,8), lmat(0xffe8b0));
   e.scale.y = 1.4; e.castShadow = true;
   return e;
+}
+
+function makeOutlineMesh(size) {
+  // BackSide white sphere — sits as a child of the enemy mesh, creating a glowing outline halo
+  const m = new THREE.Mesh(
+    new THREE.SphereGeometry(size * 1.55, 10, 10),
+    new THREE.MeshBasicMaterial({ color:0xffffff, side:THREE.BackSide, transparent:true, opacity:0.88 })
+  );
+  m.visible = false;
+  return m;
 }
 
 function makeProjectile(color) {
@@ -828,6 +838,8 @@ const G = {
 
   // Player combat target (for chicken assist)
   playerTarget: null,
+  // Single locked target — white-outlined, all attacks home toward it
+  lockedTarget: null,
 
   // HUD / UI
   msgEl: document.getElementById('msg-box'),
@@ -852,6 +864,7 @@ const G = {
     this.unlockedZones = { farm:true, gym:false, beach:false, mountain:false, volcano:false };
     this.currentZone = 'farm';
     this.playerTarget = null;
+    this.lockedTarget = null;
 
     // Build all scenes
     this.scenes.farm     = buildFarmScene();
@@ -950,6 +963,11 @@ const G = {
     };
     e.mesh = makeEnemyMesh(type);
     e.mesh.position.copy(e.pos);
+    // Outline halo child — shown only when this is the locked target
+    e.outlineMesh = makeOutlineMesh(def.sz);
+    e.outlineMesh.position.y = def.sz * 0.75;
+    e.mesh.add(e.outlineMesh);
+    e.aggroed = false;
     scene.add(e.mesh);
     this.enemies.push(e);
     return e;
@@ -1177,9 +1195,17 @@ const G = {
       this.playerTarget = nearest.dead ? null : nearest;
     }
 
-    // Shoot projectile in facing direction
+    // Shoot projectile — homes toward locked target if one exists
     const fwd = new THREE.Vector3(Math.sin(this.player.facingYaw), 0, Math.cos(this.player.facingYaw));
-    this.spawnProjectile(this.player.pos.clone().add(new THREE.Vector3(0,1.2,0)), fwd, 0.35, this.player.dmg, 0x88ccff, 'player');
+    this.spawnProjectile(this.player.pos.clone().add(new THREE.Vector3(0,1.2,0)), fwd, 0.35, this.player.dmg, 0x88ccff, 'player', this.lockedTarget);
+  },
+
+  setLockedTarget(e) {
+    if (this.lockedTarget && this.lockedTarget.outlineMesh)
+      this.lockedTarget.outlineMesh.visible = false;
+    this.lockedTarget = e || null;
+    if (this.lockedTarget && this.lockedTarget.outlineMesh)
+      this.lockedTarget.outlineMesh.visible = true;
   },
 
   damageEnemy(e, dmg) {
@@ -1191,6 +1217,13 @@ const G = {
       e.mesh.parent && e.mesh.parent.remove(e.mesh);
       this.onEnemyKilled(e);
       if (this.playerTarget === e) this.playerTarget = null;
+      if (this.lockedTarget === e) {
+        // Hand lock off to the next already-aggroed enemy in this scene
+        const next = this.enemies.find(en =>
+          !en.dead && en.aggroed && en !== e && en.mesh.parent === this.activeScene
+        );
+        this.setLockedTarget(next || null);
+      }
       return true;
     }
     return false;
@@ -1211,13 +1244,14 @@ const G = {
     else this.msg(`${e.label} defeated! Dropped a ${runeType} rune.`, '#88ff88');
   },
 
-  spawnProjectile(origin, dir, spd, dmg, color, owner) {
+  spawnProjectile(origin, dir, spd, dmg, color, owner, homingTarget) {
     const pr = {
       pos: origin.clone(),
       dir: dir.clone().normalize(),
       speed: spd,
       dmg, color, owner,
-      life: 70, dead: false,
+      homingTarget: homingTarget || null,
+      life: 80, dead: false,
       mesh: makeProjectile(color),
     };
     pr.mesh.position.copy(pr.pos);
@@ -1605,6 +1639,15 @@ const G = {
     else p.mesh.visible = true;
     if (p.attackCooldown > 0) p.attackCooldown--;
 
+    // ── Player HP regen (~1 HP / 4 s, pauses for 2 s after taking a hit) ──
+    if (p.hp < p.maxHp && p.invincible === 0) {
+      p.hpRegen = (p.hpRegen || 0) + (dt / 240);
+      if (p.hpRegen >= 1) {
+        p.hp = Math.min(p.maxHp, p.hp + Math.floor(p.hpRegen));
+        p.hpRegen -= Math.floor(p.hpRegen);
+      }
+    }
+
     // ── Portal check ──
     const portals = this.activeScene.userData.portals || [];
     for (const portal of portals) {
@@ -1686,7 +1729,7 @@ const G = {
             const dx=combatTarget.pos.x-c.pos.x, dz=combatTarget.pos.z-c.pos.z;
             const len=Math.sqrt(dx*dx+dz*dz)||1;
             const col = c.transform==='air'?0x87CEEB:c.transform==='water'?0x4169E1:c.transform==='fire'?0xFF4500:0xffffff;
-            this.spawnProjectile(c.pos.clone().add(new THREE.Vector3(0,0.9,0)), new THREE.Vector3(dx/len,0,dz/len), 0.28, dmg, col, 'chicken');
+            this.spawnProjectile(c.pos.clone().add(new THREE.Vector3(0,0.9,0)), new THREE.Vector3(dx/len,0,dz/len), 0.28, dmg, col, 'chicken', this.lockedTarget);
           } else {
             this.damageEnemy(combatTarget, dmg);
             if (combatTarget.dead && this.playerTarget === combatTarget) this.playerTarget = null;
@@ -1760,6 +1803,14 @@ const G = {
 
       const d = dist2D(e, p);
 
+      // ── Aggro detection — first sight sets the locked target ──
+      if (d < e.aggroRange && !e.aggroed) {
+        e.aggroed = true;
+        if (!this.lockedTarget || this.lockedTarget.dead) {
+          this.setLockedTarget(e);
+        }
+      }
+
       // Aggro/chase
       if (d < e.aggroRange) {
         if (!e.isBoss && d > (e.atkRange || 3)) {
@@ -1795,6 +1846,16 @@ const G = {
     // ── Projectile update ──
     for (const pr of this.projectiles) {
       if (pr.dead || pr.mesh.parent !== this.activeScene) continue;
+
+      // Homing steering — curve toward locked target
+      if (pr.homingTarget && !pr.homingTarget.dead) {
+        const tx = pr.homingTarget.pos.x - pr.pos.x;
+        const tz = pr.homingTarget.pos.z - pr.pos.z;
+        const tLen = Math.sqrt(tx*tx + tz*tz) || 1;
+        const desired = new THREE.Vector3(tx/tLen, 0, tz/tLen);
+        pr.dir.lerp(desired, 0.09).normalize();
+      }
+
       pr.pos.addScaledVector(pr.dir, pr.speed * dt);
       pr.pos.y = pr.owner==='enemy' ? 1.0 : 1.1;
       pr.mesh.position.copy(pr.pos);
