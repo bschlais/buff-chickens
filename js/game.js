@@ -1737,14 +1737,19 @@ const G = {
           }
         }
       } else if (c.following) {
-        // Follow player formation
-        const angle = (followIdx / Math.max(1,followingChickens.length)) * Math.PI*2 + Date.now()*0.0005;
-        const radius = 2.5 + Math.floor(followIdx/8)*1.5;
-        const targetX = p.pos.x + Math.cos(angle)*radius;
-        const targetZ = p.pos.z + Math.sin(angle)*radius + 2.5;
+        // Line up in a 3-wide grid directly behind the player
+        const row = Math.floor(followIdx / 3);
+        const col = (followIdx % 3) - 1; // -1, 0, +1
+        const behindX = -Math.sin(p.facingYaw);
+        const behindZ = -Math.cos(p.facingYaw);
+        const rightX  =  Math.cos(p.facingYaw);
+        const rightZ  = -Math.sin(p.facingYaw);
+        const depth = 2.2 + row * 1.8;
+        const targetX = p.pos.x + behindX*depth + rightX*col*1.5;
+        const targetZ = p.pos.z + behindZ*depth + rightZ*col*1.5;
         const dx = targetX-c.pos.x, dz = targetZ-c.pos.z;
         const d = Math.sqrt(dx*dx+dz*dz);
-        if (d > 0.5) {
+        if (d > 0.4) {
           const spd = this.getChickenSpeed(c)*dt;
           c.pos.x += (dx/d)*Math.min(spd,d);
           c.pos.z += (dz/d)*Math.min(spd,d);
