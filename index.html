@@ -34,7 +34,7 @@
     </div>
 
     <div id="msg-box"></div>
-    <div id="controls-bar">WASD:Move | Click/F:Attack | E:Feed/Interact | Z:Sleep | C:Chickens | S:Save | L:Load | M:Map</div>
+    <div id="controls-bar">WASD:Move | RMB:Camera | Click/F:Attack | E:Interact | Z:Sleep | C:Chickens | S:Save | L:Load</div>
 
     <!-- Panels -->
     <div id="chicken-panel" class="side-panel hidden">
@@ -46,9 +46,6 @@
         <p id="feed-desc"></p>
         <div id="feed-options"></div>
         <button onclick="Game.closeFeedPanel()">Cancel</button>
-    </div>
-    <div id="minimap-panel" class="hidden">
-        <canvas id="minimapCanvas" width="200" height="200"></canvas>
     </div>
 
     <!-- Screens -->
@@ -98,6 +95,7 @@
         </div>
     </div>
 </div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="js/game.js"></script>
 </body>
 </html>

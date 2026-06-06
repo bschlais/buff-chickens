@@ -1,1674 +1,1899 @@
+'use strict';
 // ============================================================
-// BUFF CHICKENS — js/game.js
-// All game logic in one file (Canvas 2D top-down)
+// BUFF CHICKENS — js/game.js  (3D Edition v2.0)
+// Three.js WebGL 3D farm RPG
 // ============================================================
 
-// ---------- Constants ----------
-const W = () => canvas.width;
-const H = () => canvas.height;
-const TWO_PI = Math.PI * 2;
+// ── Renderer & Camera ────────────────────────────────────────
+const canvas = document.getElementById('gameCanvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.setSize(window.innerWidth, window.innerHeight);
 
-const RUNE_TYPES = ['air','earth','water','fire'];
-const SPECIAL_RUNE = ['buff','sand','rock','lava'];
-const ALL_RUNES = [...RUNE_TYPES,...SPECIAL_RUNE];
+const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 800);
 
-const AREA_UNLOCK = { air:'gym', earth:'mountain', water:'beach', fire:'volcano' };
-const AREA_RUNE   = { gym:'buff', mountain:'rock', beach:'sand', volcano:'lava' };
-const AREA_ENEMY  = {
-  gym:      { name:'Buff Pig',      color:'#e0a0e0', size:22, hp:80,  dmg:18, speed:1.1, ranged:false },
-  beach:    { name:'Sand Cat',      color:'#f4e066', size:14, hp:30,  dmg:10, speed:2.4, ranged:false },
-  mountain: { name:'Mountain Goat', color:'#888',    size:18, hp:50,  dmg:14, speed:1.4, ranged:false },
-  volcano:  { name:'Rocky Rat',     color:'#c66',    size:12, hp:25,  dmg:8,  speed:2.0, ranged:false },
+window.addEventListener('resize', () => {
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+});
+
+// ── Camera orbit state ───────────────────────────────────────
+let camYaw = 0;       // horizontal orbit angle
+let camPitch = 0.45;  // vertical tilt (radians)
+const CAM_DIST = 13;
+const CAM_LOOK_H = 1.4; // look-at height offset above player base
+
+// ── Input ────────────────────────────────────────────────────
+const keys = {};
+let mouseRightDown = false, lastMX = 0, lastMY = 0;
+
+window.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; handleKey(e.key.toLowerCase()); });
+window.addEventListener('keyup',   e => { keys[e.key.toLowerCase()] = false; });
+canvas.addEventListener('mousedown', e => {
+  if (e.button === 2) { mouseRightDown = true; lastMX = e.clientX; lastMY = e.clientY; }
+  if (e.button === 0 && G.running) G.playerAttack();
+});
+canvas.addEventListener('mouseup',  e => { if (e.button === 2) mouseRightDown = false; });
+canvas.addEventListener('mousemove', e => {
+  if (!mouseRightDown) return;
+  camYaw   -= (e.clientX - lastMX) * 0.005;
+  camPitch  = Math.max(0.15, Math.min(1.2, camPitch + (e.clientY - lastMY) * 0.003));
+  lastMX = e.clientX; lastMY = e.clientY;
+});
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+function handleKey(k) {
+  if (!G.running) return;
+  if (k === 'z') G.sleep();
+  if (k === 'c') G.toggleChickenPanel();
+  if (k === 's') G.save();
+  if (k === 'l') G.load();
+  if (k === 'e') G.interact();
+  if (k === 'f') G.playerAttack();
+}
+
+// ── Constants ────────────────────────────────────────────────
+const RUNE_TYPES    = ['air','earth','water','fire'];
+const SPECIAL_RUNES = ['buff','sand','rock','lava'];
+const ALL_RUNES     = [...RUNE_TYPES, ...SPECIAL_RUNES];
+
+const RUNE_COLORS = {
+  air:0x87CEEB, earth:0x8B6914, water:0x4169E1, fire:0xFF4500,
+  buff:0xFFD700, sand:0xF4A460, rock:0xaaaaaa,  lava:0xFF6347,
+};
+const RUNE_EMOJI = { air:'💨',earth:'🪨',water:'💧',fire:'🔥',buff:'💪',sand:'🏖️',rock:'⛰️',lava:'🌋' };
+
+const CHK_XFORM = {
+  air:  { color:0xc8f0ff, label:'Air Chicken',   baseDmg:12, baseSpd:0.12, atkR:10, proj:true  },
+  earth:{ color:0xb8a060, label:'Earth Chicken', baseDmg:20, baseSpd:0.07, atkR:2.5,proj:false },
+  water:{ color:0x6699ff, label:'Water Chicken', baseDmg:14, baseSpd:0.10, atkR:12, proj:true  },
+  fire: { color:0xff6622, label:'Fire Chicken',  baseDmg:18, baseSpd:0.09, atkR:10, proj:true  },
 };
 
 const ENEMY_DEFS = {
-  cyborg_cow:    { label:'Cyborg Cow',    color:'#aaccff', size:26, hp:70,  dmg:14, speed:0.8, ranged:true,  runeType:'air'  },
-  psychic_sheep: { label:'Psychic Sheep', color:'#cc88ff', size:20, hp:50,  dmg:18, speed:0.9, ranged:true,  runeType:'earth'},
-  heavy_horse:   { label:'Heavy Horse',   color:'#a09060', size:34, hp:120, dmg:22, speed:0.65,ranged:false, runeType:'water'},
-  monster_mutt:  { label:'Monster Mutt',  color:'#ff8844', size:18, hp:40,  dmg:16, speed:2.0, ranged:false, runeType:'fire' },
+  cyborg_cow:   { label:'Cyborg Cow',    col:0x88aacc, sz:1.2, hp:70,  dmg:14, spd:0.045, ranged:true,  atkR:18, runeT:'air',   aggR:25 },
+  psychic_sheep:{ label:'Psychic Sheep', col:0xcc88ff, sz:0.9, hp:50,  dmg:18, spd:0.050, ranged:true,  atkR:16, runeT:'earth', aggR:22 },
+  heavy_horse:  { label:'Heavy Horse',   col:0xa09060, sz:1.6, hp:120, dmg:22, spd:0.035, ranged:false, atkR:3,  runeT:'water', aggR:20 },
+  monster_mutt: { label:'Monster Mutt',  col:0xff8844, sz:0.8, hp:40,  dmg:16, spd:0.090, ranged:false, atkR:2,  runeT:'fire',  aggR:25 },
+};
+const ZONE_ENEMY = {
+  gym:     { label:'Buff Pig',      col:0xe0a0e0, sz:1.0, hp:80,  dmg:18, spd:0.055, ranged:false, atkR:2.5,runeT:'buff', aggR:20 },
+  beach:   { label:'Sand Cat',      col:0xf4e066, sz:0.5, hp:30,  dmg:10, spd:0.110, ranged:false, atkR:2,  runeT:'sand', aggR:18 },
+  mountain:{ label:'Mountain Goat', col:0x888888, sz:0.8, hp:50,  dmg:14, spd:0.065, ranged:false, atkR:2,  runeT:'rock', aggR:20 },
+  volcano: { label:'Rocky Rat',     col:0xcc6666, sz:0.4, hp:25,  dmg:8,  spd:0.100, ranged:false, atkR:2,  runeT:'lava', aggR:18 },
 };
 
-const CHICKEN_TRANSFORM = {
-  air:   { color:'#c8f0ff', wingScale:2.0, label:'Air Chicken',   dmg:12, speed:2.5, atkRange:80,  projectile:true,  atkLabel:'Wind Slash'  },
-  earth: { color:'#b8a060', wingScale:1.0, label:'Earth Chicken', dmg:20, speed:1.4, atkRange:50,  projectile:false, atkLabel:'Ground Smash' },
-  water: { color:'#6699ff', wingScale:1.2, label:'Water Chicken', dmg:14, speed:2.0, atkRange:120, projectile:true,  atkLabel:'Water Bolt'  },
-  fire:  { color:'#ff6622', wingScale:1.3, label:'Fire Chicken',  dmg:18, speed:1.8, atkRange:100, projectile:true,  atkLabel:'Fireball'    },
+const ZONES = {
+  farm:    { label:'The Farm'    },
+  gym:     { label:'The Gym'     },
+  beach:   { label:'The Beach'   },
+  mountain:{ label:'The Mountain'},
+  volcano: { label:'The Volcano' },
 };
 
-const FARM_SIZE = 4000;
-const AREA_RADIUS = 600;
-const AREAS = {
-  farm:     { x:0,           y:0,           label:'The Farm',      color:'#2a4a1a' },
-  gym:      { x:-1600,       y:-800,        label:'The Gym',       color:'#4a3a1a' },
-  beach:    { x:1600,        y:-1000,       label:'The Beach',     color:'#4a4010' },
-  mountain: { x:-1400,       y:1000,        label:'The Mountain',  color:'#3a3a3a' },
-  volcano:  { x:1400,        y:1000,        label:'The Volcano',   color:'#4a1a0a' },
-};
+const UNLOCK_REQ = { air:'gym', earth:'mountain', water:'beach', fire:'volcano' };
+const ZONE_RUNE  = { gym:'buff', mountain:'rock', beach:'sand', volcano:'lava' };
 
-// ---------- Utilities ----------
-function rnd(min,max){ return min + Math.random()*(max-min); }
-function rndI(min,max){ return Math.floor(rnd(min,max+1)); }
-function dist(a,b){ const dx=a.x-b.x,dy=a.y-b.y; return Math.sqrt(dx*dx+dy*dy); }
-function norm(dx,dy){ const l=Math.sqrt(dx*dx+dy*dy)||1; return [dx/l,dy/l]; }
-function lerp(a,b,t){ return a+(b-a)*t; }
+// ── Utilities ────────────────────────────────────────────────
+const rnd  = (a,b) => a + Math.random()*(b-a);
+const rndI = (a,b) => Math.floor(rnd(a,b+1));
 
-// ---------- Canvas Setup ----------
-const canvas = document.getElementById('gameCanvas');
-const ctx = canvas.getContext('2d');
-canvas.width  = window.innerWidth;
-canvas.height = window.innerHeight;
-window.addEventListener('resize',()=>{
-  canvas.width=window.innerWidth;
-  canvas.height=window.innerHeight;
-});
-
-// ---------- Input ----------
-const keys = {};
-let mouseX=0,mouseY=0,mouseDown=false;
-window.addEventListener('keydown',e=>{
-  keys[e.key.toLowerCase()]=true;
-  handleKey(e.key.toLowerCase());
-});
-window.addEventListener('keyup',e=>{ keys[e.key.toLowerCase()]=false; });
-canvas.addEventListener('mousemove',e=>{ mouseX=e.clientX; mouseY=e.clientY; });
-canvas.addEventListener('mousedown',e=>{ mouseDown=true; handleClick(e); });
-canvas.addEventListener('mouseup',()=>{ mouseDown=false; });
-
-function handleKey(k){
-  if(!G.running) return;
-  if(k==='z') G.sleep();
-  if(k==='c') G.toggleChickenPanel();
-  if(k==='s') G.save();
-  if(k==='l') G.load();
-  if(k==='m') G.toggleMinimap();
-  if(k==='e') G.interact();
-  if(k==='f') G.playerAttack();
+function dist2D(a, b) {
+  const ax = a.pos ? a.pos.x : a.x;
+  const az = a.pos ? a.pos.z : a.z;
+  const bx = b.pos ? b.pos.x : b.x;
+  const bz = b.pos ? b.pos.z : b.z;
+  return Math.sqrt((ax-bx)**2 + (az-bz)**2);
 }
-function handleClick(e){
-  if(!G.running) return;
-  // Feed panel buttons are HTML; canvas clicks = attack toward mouse
-  G.playerAttack();
+
+// ── Geometry / Material cache ────────────────────────────────
+const _G = {}, _M = {};
+const sphG  = (r,s=8) => { const k=`sp${r}${s}`; return _G[k]||(_G[k]=new THREE.SphereGeometry(r,s,s)); };
+const boxG  = (w,h,d) => { const k=`bx${w}${h}${d}`; return _G[k]||(_G[k]=new THREE.BoxGeometry(w,h,d)); };
+const cylG  = (a,b,h,s=8) => { const k=`cy${a}${b}${h}${s}`; return _G[k]||(_G[k]=new THREE.CylinderGeometry(a,b,h,s)); };
+const coneG = (r,h,s=6) => { const k=`cn${r}${h}${s}`; return _G[k]||(_G[k]=new THREE.ConeGeometry(r,h,s)); };
+const toruG = (r,t,rs,ts) => new THREE.TorusGeometry(r,t,rs,ts);
+const lmat  = (c) => _M[c] || (_M[c] = new THREE.MeshLambertMaterial({color:c}));
+const bmat  = (c,op=1) => { const k=`${c}_${op}`; return _M[k]||(_M[k]=new THREE.MeshBasicMaterial({color:c,transparent:op<1,opacity:op})); };
+const M     = (geo,mat) => new THREE.Mesh(geo,mat);
+
+// ── Add mesh helper ──────────────────────────────────────────
+function addM(parent, geo, mat, px=0,py=0,pz=0, rx=0,ry=0,rz=0, sx=1,sy=1,sz=1) {
+  const m = M(geo, mat);
+  m.position.set(px,py,pz);
+  m.rotation.set(rx,ry,rz);
+  m.scale.set(sx,sy,sz);
+  m.castShadow = true;
+  parent.add(m);
+  return m;
 }
 
 // ============================================================
-// ENTITIES
+// PROCEDURAL 3D MODELS  (all facing +Z by default)
 // ============================================================
 
-class Entity {
-  constructor(x,y,size,color){
-    this.x=x; this.y=y; this.size=size; this.color=color;
-    this.hp=100; this.maxHp=100;
-    this.vx=0; this.vy=0;
-    this.dead=false;
-    this.angle=0;
+function makeChickenMesh(gender='hen', transform=null, buffLevel=0) {
+  const g = new THREE.Group();
+  const bColor = transform ? CHK_XFORM[transform].color : (gender==='rooster' ? 0xffcc44 : 0xffe080);
+  const bMat   = lmat(bColor);
+  const scale  = 1 + buffLevel * 0.2;
+
+  // Legs (y=0 is ground)
+  const legMat = lmat(0xffaa00);
+  for (const xs of [-0.12, 0.12]) {
+    addM(g, cylG(0.045,0.045,0.38), legMat, xs,0.19,0.05);
+    addM(g, boxG(0.2,0.04,0.1),     legMat, xs+0.04,0.02,0.08);
   }
-  draw(cx,cy){} // override
-  drawHpBar(cx,cy,sx,sy){
-    if(this.hp>=this.maxHp) return;
-    const bw=this.size*2, bh=4;
-    const bx=sx-bw/2, by=sy-this.size-8;
-    ctx.fillStyle='#550000';
-    ctx.fillRect(bx,by,bw,bh);
-    ctx.fillStyle='#e74c3c';
-    ctx.fillRect(bx,by,bw*(this.hp/this.maxHp),bh);
+  // Body
+  const body = M(sphG(0.48,8), bMat);
+  body.position.set(0,0.52,0); body.scale.set(1,0.85,1); body.castShadow=true;
+  g.add(body);
+  // Wings
+  const wScale = transform ? (transform==='air'?2.2:1.2) : 1.0;
+  const wingMat = new THREE.MeshLambertMaterial({color:bColor, transparent:true, opacity:0.85});
+  for (const xs of [-1,1]) {
+    addM(g, boxG(0.12,0.22,0.38*wScale), wingMat, xs*0.5,0.52,0, 0,0,xs*0.28);
   }
+  // Head
+  addM(g, sphG(0.3,8), bMat, 0,0.88,0.38);
+  // Beak
+  addM(g, coneG(0.06,0.2,6), lmat(0xe8a020), 0,0.84,0.7, Math.PI/2,0,0);
+  // Comb
+  for (let i=0;i<3;i++) addM(g, sphG(0.07,6), lmat(0xee0000), 0,1.12,0.3+i*0.06);
+  // Eye
+  addM(g, sphG(0.045,6), lmat(0x111111), 0.17,0.9,0.65);
+
+  // Rooster tail
+  if (gender==='rooster') {
+    addM(g, coneG(0.14,0.44,5), lmat(0xcc4400), 0,0.65,-0.55, -Math.PI/2,0,0);
+    addM(g, coneG(0.1,0.38,5),  lmat(0xff6600), 0.12,0.7,-0.5, -Math.PI*0.55,0.2,0);
+    addM(g, coneG(0.1,0.38,5),  lmat(0xff6600), -0.12,0.7,-0.5,-Math.PI*0.55,-0.2,0);
+  }
+
+  // Transform decorations
+  if (transform === 'fire') {
+    for (let i=0;i<4;i++) {
+      const a = i*Math.PI/2;
+      const fl = M(coneG(0.07,0.22,5), new THREE.MeshBasicMaterial({color:0xff6600,transparent:true,opacity:0.8}));
+      fl.position.set(Math.cos(a)*0.38,0.55,Math.sin(a)*0.38);
+      g.add(fl);
+    }
+  }
+  if (transform === 'earth') {
+    addM(g, sphG(0.14,6), lmat(0x5a4520), -0.2,0.65,0.25);
+    addM(g, sphG(0.11,6), lmat(0x6b5530),  0.18,0.7,-0.15);
+  }
+  if (transform === 'water') {
+    const ring = M(toruG(0.52,0.04,6,16), bmat(0x4169e1,0.6));
+    ring.rotation.x = Math.PI/2; ring.position.set(0,0.45,0);
+    g.add(ring);
+  }
+  if (transform === 'air') {
+    const ring = M(toruG(0.65,0.03,6,20), bmat(0x87ceeb,0.5));
+    ring.rotation.x = Math.PI/2; ring.position.set(0,0.4,0);
+    g.add(ring);
+  }
+
+  // Buff muscles
+  if (buffLevel > 0) {
+    for (const xs of [-1,1]) {
+      const m = M(sphG(0.18+buffLevel*0.04,8), lmat(0xffaa00));
+      m.position.set(xs*0.52,0.55,0); m.scale.set(1.3,0.9,1);
+      g.add(m);
+    }
+  }
+
+  // Rock rune armor
+  if (g.userData.rockArmored) {
+    for (let i=0;i<6;i++) {
+      const a=i*Math.PI/3;
+      addM(g, sphG(0.1,5), lmat(0x888888), Math.cos(a)*0.45,0.52,Math.sin(a)*0.45);
+    }
+  }
+
+  g.scale.setScalar(scale);
+  return g;
 }
 
-class Projectile {
-  constructor(x,y,dx,dy,speed,dmg,color,owner){
-    this.x=x; this.y=y;
-    this.dx=dx; this.dy=dy;
-    this.speed=speed; this.dmg=dmg;
-    this.color=color; this.owner=owner; // 'player','chicken','enemy'
-    this.life=60; this.dead=false;
-    this.size=6;
+function makePlayerMesh() {
+  const g = new THREE.Group();
+  // Boots
+  for (const xs of [-0.15,0.15]) {
+    addM(g, boxG(0.22,0.14,0.32), lmat(0x222222), xs+0.04,0.07,0.05);
   }
-  update(){
-    this.x+=this.dx*this.speed;
-    this.y+=this.dy*this.speed;
-    this.life--;
-    if(this.life<=0) this.dead=true;
+  // Legs
+  for (const xs of [-0.15,0.15]) {
+    addM(g, cylG(0.12,0.1,0.65,8), lmat(0x3355aa), xs,0.52,0);
   }
-  draw(sx,sy){
-    ctx.beginPath();
-    ctx.arc(sx,sy,this.size,0,TWO_PI);
-    ctx.fillStyle=this.color;
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(sx,sy,this.size*0.5,0,TWO_PI);
-    ctx.fillStyle='#fff';
-    ctx.fill();
+  // Torso
+  addM(g, boxG(0.56,0.72,0.36), lmat(0x336699), 0,1.05,0);
+  // Belt
+  addM(g, boxG(0.58,0.08,0.38), lmat(0x884400), 0,0.72,0);
+  // Arms
+  for (const xs of [-1,1]) {
+    addM(g, cylG(0.09,0.08,0.55,8), lmat(0x336699), xs*0.35,1.0,0, 0,0,xs*0.25);
+    addM(g, sphG(0.1,6), lmat(0xffcc88), xs*0.44,0.72,0);
   }
+  // Neck
+  addM(g, cylG(0.1,0.1,0.18,8), lmat(0xffcc88), 0,1.48,0);
+  // Head
+  addM(g, sphG(0.27,8), lmat(0xffcc88), 0,1.78,0);
+  // Hair
+  const hair = M(sphG(0.27,8), lmat(0x553300));
+  hair.position.set(0,1.88,0); hair.scale.set(1,0.5,1.1); g.add(hair);
+  // Eyes
+  addM(g, sphG(0.04,6), lmat(0x111111), 0.18,1.78,0.24);
+  addM(g, sphG(0.04,6), lmat(0x111111), -0.18,1.78,0.24);
+  // Sword
+  const sw = new THREE.Group();
+  addM(sw, boxG(0.06,0.68,0.04), lmat(0xcccccc), 0,0.34,0);
+  addM(sw, boxG(0.24,0.06,0.07), lmat(0x8B6914), 0,0,0);
+  addM(sw, cylG(0.05,0.05,0.24,6), lmat(0x8B4513), 0,-0.17,0);
+  sw.position.set(0,0.85,0.5); sw.rotation.x = 0.3;
+  g.add(sw);
+  return g;
 }
 
-// ---------- Rune pickup ----------
-class RunePickup {
-  constructor(x,y,type){
-    this.x=x; this.y=y; this.type=type;
-    this.dead=false; this.size=10;
-    this.bobPhase=rnd(0,TWO_PI);
+function makeEnemyMesh(type) {
+  const g = new THREE.Group();
+  const d = ENEMY_DEFS[type] || ZONE_ENEMY[type] || ENEMY_DEFS.monster_mutt;
+  const c = d.col;
+
+  if (type === 'cyborg_cow') {
+    addM(g, boxG(1.7,1.3,1.1), lmat(c), 0,0.75,0);
+    addM(g, boxG(0.85,0.75,0.65), lmat(c), 0,1.1,0.95);
+    addM(g, boxG(0.95,0.48,0.28), lmat(0x445566), 0,1.15,0);
+    addM(g, sphG(0.1,8), bmat(0x00ff88), 0.3,1.25,1.25);
+    addM(g, cylG(0.03,0.02,0.55,6), lmat(0x445566), 0.3,1.65,0);
+    for (const [xs,zs] of [[-0.5,-0.42],[-0.5,0.42],[0.5,-0.42],[0.5,0.42]]) {
+      addM(g, cylG(0.11,0.09,0.82,6), lmat(0x445566), xs,0.12,zs);
+    }
   }
-  draw(sx,sy){
-    const bob=Math.sin(Date.now()/500+this.bobPhase)*4;
-    const COLORS={air:'#87CEEB',earth:'#8B6914',water:'#4169E1',fire:'#FF4500',
-                  buff:'#FFD700',sand:'#F4A460',rock:'#aaa',lava:'#FF6347'};
-    const EMOJI={air:'💨',earth:'🪨',water:'💧',fire:'🔥',buff:'💪',sand:'🏖️',rock:'⛰️',lava:'🌋'};
-    ctx.beginPath();
-    ctx.arc(sx,sy+bob,this.size,0,TWO_PI);
-    ctx.fillStyle=COLORS[this.type]||'#fff';
-    ctx.fill();
-    ctx.strokeStyle='rgba(255,255,255,0.5)';
-    ctx.lineWidth=1.5;
-    ctx.stroke();
-    ctx.font='12px serif';
-    ctx.textAlign='center';
-    ctx.textBaseline='middle';
-    ctx.fillText(EMOJI[this.type],sx,sy+bob);
+  else if (type === 'psychic_sheep') {
+    const bdy = M(sphG(0.75,8), lmat(0xcc88ff)); bdy.scale.y=0.85; bdy.position.set(0,0.72,0); bdy.castShadow=true; g.add(bdy);
+    for (let i=0;i<6;i++) {
+      const a=i*Math.PI/3;
+      addM(g, sphG(0.3,6), lmat(0xbb77ee), Math.cos(a)*0.58,0.82,Math.sin(a)*0.58);
+    }
+    addM(g, sphG(0.36,8), lmat(0xddaaff), 0,1.22,0.65);
+    addM(g, sphG(0.11,8), bmat(0xff00ff), 0,1.3,1.01);
+    addM(g, sphG(0.055,6), bmat(0x000000), 0,1.3,1.12);
+    for (const xs of [-0.28,0.28]) addM(g, boxG(0.18,0.32,0.16), lmat(0x333333), xs,0.08,0);
   }
+  else if (type === 'heavy_horse') {
+    const bdy = M(sphG(1.25,8), lmat(c)); bdy.scale.set(1,0.9,1); bdy.position.set(0,1.15,0); bdy.castShadow=true; g.add(bdy);
+    addM(g, boxG(0.85,0.62,0.52), lmat(c), 0,1.6,1.3);
+    addM(g, boxG(0.2,0.62,0.52), lmat(0x604020), -0.1,1.95,0.95);
+    addM(g, sphG(0.07,6), lmat(0x553300), 0.12,1.52,1.62);
+    addM(g, sphG(0.07,6), lmat(0x553300), -0.12,1.52,1.62);
+  }
+  else if (type === 'monster_mutt') {
+    addM(g, boxG(0.88,0.62,0.58), lmat(c), 0,0.58,0);
+    addM(g, sphG(0.42,8), lmat(c), 0,1.08,0.55);
+    for (const xs of [-0.18,0.18]) {
+      addM(g, coneG(0.08,0.5,6), lmat(0xcc4400), xs,1.6,0.42);
+    }
+    addM(g, boxG(0.24,0.17,0.18), lmat(c), 0,0.94,0.88);
+    for (const [xs,zs] of [[-0.2,-0.24],[-0.2,0.24],[0.22,-0.24],[0.22,0.24]]) {
+      addM(g, cylG(0.08,0.06,0.58,6), lmat(c), xs,0.1,zs);
+    }
+  }
+  else if (type === 'gym') {
+    const bdy = M(sphG(0.68,8), lmat(0xe0a0e0)); bdy.scale.set(1.2,1,1.2); bdy.position.set(0,0.8,0); bdy.castShadow=true; g.add(bdy);
+    for (const xs of [-1,1]) addM(g, sphG(0.33,8), lmat(0xcc88cc), xs*0.72,0.85,0);
+    addM(g, sphG(0.36,8), lmat(0xe0a0e0), 0,1.38,0.62);
+    addM(g, cylG(0.15,0.15,0.1,8), lmat(0xddaacc), 0,1.3,1.0, 0,0,Math.PI/2);
+  }
+  else if (type === 'beach') {
+    addM(g, boxG(0.58,0.38,0.38), lmat(0xf4e066), 0,0.42,0);
+    addM(g, sphG(0.27,8), lmat(0xf4e066), 0,0.76,0.4);
+    for (const xs of [-0.15,0.15]) addM(g, coneG(0.07,0.16,5), lmat(0xd4c055), xs,1.04,0.28);
+    addM(g, cylG(0.05,0.03,0.55,6), lmat(0xf4e066), -0.45,0.45,0, 0,0,-0.5);
+  }
+  else if (type === 'mountain') {
+    addM(g, boxG(0.78,0.62,0.48), lmat(0x888888), 0,0.55,0);
+    addM(g, sphG(0.31,8), lmat(0x888888), 0,1.02,0.52);
+    for (const xs of [-0.12,0.12]) {
+      const horn = M(cylG(0.04,0.01,0.52,5), lmat(0xaaaaaa));
+      horn.position.set(xs,1.4,0.42); horn.rotation.z = xs>0?-0.3:0.3; horn.castShadow=true;
+      g.add(horn);
+    }
+    addM(g, coneG(0.09,0.28,6), lmat(0xdddddd), 0,0.72,0.8, Math.PI,0,0);
+  }
+  else if (type === 'volcano') {
+    addM(g, sphG(0.34,8), lmat(0xcc6666), 0,0.38,0);
+    addM(g, sphG(0.22,8), lmat(0xcc6666), 0,0.72,0.32);
+    for (const xs of [-0.1,0.1]) addM(g, sphG(0.1,6), lmat(0xff8888), xs,0.97,0.22);
+    addM(g, cylG(0.04,0.02,0.48,6), lmat(0xcc6666), -0.38,0.38,0, 0,0,-0.7);
+  }
+  return g;
 }
 
-// ---------- Enemy ----------
-class Enemy {
-  constructor(x,y,defKey,areaKey){
-    this.x=x; this.y=y;
-    const def = areaKey ? AREA_ENEMY[areaKey] : ENEMY_DEFS[defKey];
-    this.defKey=defKey||areaKey;
-    this.areaKey=areaKey||null;
-    this.label=def.label||def.name;
-    this.color=def.color;
-    this.size=def.size;
-    this.maxHp=def.hp; this.hp=def.hp;
-    this.dmg=def.dmg; this.speed=def.speed;
-    this.ranged=def.ranged||false;
-    this.runeType=def.runeType||AREA_RUNE[areaKey]||'air';
-    this.dead=false;
-    this.attackCooldown=0;
-    this.atkRange=this.ranged?220:60;
-    this.aggroRange=300;
-    this.vx=0; this.vy=0;
-    this.angle=0;
-    this.stunTime=0;
-    this.phase=0; // boss phases
+function makeBossMesh() {
+  const g = new THREE.Group();
+  // Scale up: boss is 3x player
+  for (const xs of [-0.38,0.38]) {
+    addM(g, cylG(0.32,0.26,2.1,8), lmat(0x3366aa), xs,1.2,0);
+    addM(g, boxG(0.48,0.42,0.68), lmat(0x222222), xs+0.08,0.12,0.05);
   }
-  update(player,projectiles){
-    if(this.dead||this.stunTime>0){ this.stunTime--; return; }
-    const dx=player.x-this.x, dy=player.y-player.y;
-    const d=dist(this,player);
-    if(d<this.aggroRange){
-      if(d>this.atkRange){
-        const [nx,ny]=norm(player.x-this.x,player.y-this.y);
-        this.x+=nx*this.speed;
-        this.y+=ny*this.speed;
-        this.angle=Math.atan2(player.y-this.y,player.x-this.x);
-      }
-      if(this.attackCooldown<=0 && d<this.atkRange){
-        this.attackCooldown=90;
-        if(this.ranged){
-          const [nx,ny]=norm(player.x-this.x,player.y-this.y);
-          projectiles.push(new Projectile(this.x,this.y,nx,ny,4,this.dmg,this.color,'enemy'));
-        } else {
-          player.takeDamage(this.dmg);
-        }
-      }
-    }
-    if(this.attackCooldown>0) this.attackCooldown--;
+  addM(g, boxG(1.65,1.85,1.05), lmat(0x3366aa), 0,2.2,0);
+  addM(g, boxG(1.75,1.25,1.12), lmat(0x5a2d0c), 0,3.1,0);
+  for (const xs of [-1,1]) {
+    addM(g, cylG(0.24,0.2,1.45,8), lmat(0x5a2d0c), xs*0.98,2.9,0, 0,0,xs*0.3);
+    addM(g, sphG(0.24,8), lmat(0xc68642), xs*1.22,2.12,0);
   }
-  draw(sx,sy){
-    ctx.save();
-    ctx.translate(sx,sy);
-    ctx.rotate(this.angle);
-
-    if(this.defKey==='heavy_horse'||this.areaKey==='gym'){
-      // Ball body
-      ctx.beginPath();
-      ctx.arc(0,0,this.size,0,TWO_PI);
-      ctx.fillStyle=this.color;
-      ctx.fill();
-      ctx.strokeStyle='rgba(0,0,0,0.4)';
-      ctx.lineWidth=2;
-      ctx.stroke();
-      // Head
-      ctx.beginPath();
-      ctx.ellipse(this.size,0,this.size*0.55,this.size*0.4,0,0,TWO_PI);
-      ctx.fillStyle=this.color;
-      ctx.fill();
-    } else {
-      ctx.beginPath();
-      ctx.arc(0,0,this.size,0,TWO_PI);
-      ctx.fillStyle=this.color;
-      ctx.fill();
-      ctx.strokeStyle='rgba(0,0,0,0.3)';
-      ctx.lineWidth=2;
-      ctx.stroke();
-    }
-
-    // Eyes
-    ctx.fillStyle='#000';
-    ctx.beginPath(); ctx.arc(this.size*0.35,-this.size*0.3,2.5,0,TWO_PI); ctx.fill();
-    ctx.beginPath(); ctx.arc(this.size*0.35,this.size*0.3,2.5,0,TWO_PI); ctx.fill();
-
-    // Psychic sheep third eye
-    if(this.defKey==='psychic_sheep'){
-      ctx.fillStyle='#ff00ff';
-      ctx.beginPath(); ctx.arc(this.size*0.5,0,3.5,0,TWO_PI); ctx.fill();
-      ctx.fillStyle='#fff';
-      ctx.beginPath(); ctx.arc(this.size*0.5,0,1.5,0,TWO_PI); ctx.fill();
-    }
-    // Cyborg cow parts
-    if(this.defKey==='cyborg_cow'){
-      ctx.fillStyle='#445566';
-      ctx.fillRect(-this.size*0.2,-this.size*0.8,this.size*0.4,this.size*0.5);
-      ctx.fillStyle='#66aaff';
-      ctx.beginPath(); ctx.arc(0,-this.size*0.55,4,0,TWO_PI); ctx.fill();
-    }
-    // Monster mutt horns
-    if(this.defKey==='monster_mutt'){
-      ctx.fillStyle='#cc4400';
-      ctx.beginPath();
-      ctx.moveTo(-this.size*0.3,-this.size*0.8);
-      ctx.lineTo(-this.size*0.1,-this.size*1.4);
-      ctx.lineTo(this.size*0.1,-this.size*0.8);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.moveTo(this.size*0.1,-this.size*0.8);
-      ctx.lineTo(this.size*0.3,-this.size*1.4);
-      ctx.lineTo(this.size*0.5,-this.size*0.8);
-      ctx.fill();
-    }
-
-    ctx.restore();
-    this.drawHpBar(sx,sy);
+  addM(g, cylG(0.3,0.3,0.42,8), lmat(0xc68642), 0,3.85,0);
+  addM(g, sphG(0.82,10), lmat(0xc68642), 0,4.62,0);
+  addM(g, cylG(1.25,1.25,0.14,16), lmat(0x3a2010), 0,5.25,0);
+  addM(g, cylG(0.78,0.68,0.95,16), lmat(0x3a2010), 0,5.8,0);
+  addM(g, sphG(0.13,8), bmat(0xff2200), 0.62,4.68,0.66);
+  addM(g, sphG(0.13,8), bmat(0xff2200), -0.62,4.68,0.66);
+  addM(g, sphG(0.16,8), bmat(0xff00ff), 0,4.92,0.78);
+  addM(g, sphG(0.08,6), bmat(0x000000), 0,4.92,0.94);
+  // Pitchfork
+  addM(g, cylG(0.06,0.06,2.55,6), lmat(0x8B6914), 0,2.35,1.85);
+  for (const xs of [-0.22,0,0.22]) {
+    addM(g, cylG(0.04,0.02,0.72,6), lmat(0xcccccc), xs,3.72,1.85);
   }
-  drawHpBar(sx,sy){
-    if(this.hp>=this.maxHp) return;
-    const bw=this.size*2+8, bh=4;
-    ctx.fillStyle='#550000';
-    ctx.fillRect(sx-bw/2,sy-this.size-10,bw,bh);
-    ctx.fillStyle='#e74c3c';
-    ctx.fillRect(sx-bw/2,sy-this.size-10,bw*(this.hp/this.maxHp),bh);
-  }
-  takeDamage(dmg){
-    this.hp-=dmg;
-    this.stunTime=8;
-    if(this.hp<=0){ this.dead=true; return true; }
-    return false;
-  }
+  return g;
 }
 
-// ---------- Boss ----------
-class Boss extends Enemy {
-  constructor(){
-    super(0,-300,null,null);
-    this.label='Farmer Jim';
-    this.color='#8B4513';
-    this.size=70;
-    this.maxHp=2000; this.hp=2000;
-    this.dmg=35; this.speed=0.7;
-    this.ranged=true;
-    this.atkRange=350;
-    this.aggroRange=9999;
-    this.phase=1;
-    this.specialCooldown=0;
-    this.isBoss=true;
-  }
-  update(player,projectiles){
-    if(this.dead) return;
-    const d=dist(this,player);
-    // Phase transitions
-    if(this.hp<1500&&this.phase===1){ this.phase=2; this.speed=1.0; this.dmg=45; G.msg('Farmer Jim: PHASE 2! "I\'ll turn you all into nuggets!"','#ff4400'); }
-    if(this.hp<800&&this.phase===2){ this.phase=3; this.speed=1.4; this.dmg=55; G.msg('Farmer Jim: PHASE 3! "NO MORE MISTER NICE FARMER!"','#ff0000'); }
-
-    const [nx,ny]=norm(player.x-this.x,player.y-this.y);
-    if(d>this.atkRange*0.7){
-      this.x+=nx*this.speed;
-      this.y+=ny*this.speed;
-    }
-    this.angle=Math.atan2(player.y-this.y,player.x-this.x);
-
-    if(this.attackCooldown<=0){
-      this.attackCooldown=50;
-      // Triple shot
-      for(let a=-0.3;a<=0.31;a+=0.3){
-        const ang=Math.atan2(player.y-this.y,player.x-this.x)+a;
-        projectiles.push(new Projectile(this.x,this.y,Math.cos(ang),Math.sin(ang),5,this.dmg,'#ff4400','enemy'));
-      }
-    }
-    this.attackCooldown--;
-
-    if(this.specialCooldown<=0){
-      this.specialCooldown=200;
-      // Ring attack
-      for(let i=0;i<8;i++){
-        const a=(i/8)*TWO_PI;
-        projectiles.push(new Projectile(this.x,this.y,Math.cos(a),Math.sin(a),3.5,this.dmg*0.7,'#ff8800','enemy'));
-      }
-      G.msg('Farmer Jim uses RING OF PITCHFORKS!','#ff6600');
-    }
-    this.specialCooldown--;
-  }
-  draw(sx,sy){
-    ctx.save();
-    ctx.translate(sx,sy);
-
-    // Body
-    ctx.beginPath();
-    ctx.arc(0,10,this.size*0.7,0,TWO_PI);
-    ctx.fillStyle='#5a2d0c';
-    ctx.fill();
-
-    // Head
-    ctx.beginPath();
-    ctx.arc(0,-this.size*0.35,this.size*0.55,0,TWO_PI);
-    ctx.fillStyle='#c68642';
-    ctx.fill();
-
-    // Overalls
-    ctx.fillStyle='#3366aa';
-    ctx.fillRect(-this.size*0.45,0,this.size*0.9,this.size*0.55);
-    ctx.beginPath();
-    ctx.arc(0,0,this.size*0.5,0,Math.PI);
-    ctx.fillStyle='#3366aa';
-    ctx.fill();
-
-    // Pitchfork
-    ctx.strokeStyle='#8B6914';
-    ctx.lineWidth=5;
-    ctx.beginPath();
-    ctx.moveTo(this.size*0.7,-this.size*0.2);
-    ctx.lineTo(this.size*0.7,-this.size*0.9);
-    ctx.stroke();
-    ctx.strokeStyle='#aaa';
-    ctx.lineWidth=3;
-    for(let i=-1;i<=1;i++){
-      ctx.beginPath();
-      ctx.moveTo(this.size*0.7+i*8,-this.size*0.9);
-      ctx.lineTo(this.size*0.7+i*8,-this.size*1.15);
-      ctx.stroke();
-    }
-
-    // Eyes (angry)
-    ctx.fillStyle='#cc0000';
-    ctx.beginPath(); ctx.arc(-this.size*0.15,-this.size*0.4,5,0,TWO_PI); ctx.fill();
-    ctx.beginPath(); ctx.arc(this.size*0.15,-this.size*0.4,5,0,TWO_PI); ctx.fill();
-    // Third eye (boss)
-    ctx.fillStyle='#ff00ff';
-    ctx.beginPath(); ctx.arc(0,-this.size*0.5,7,0,TWO_PI); ctx.fill();
-    ctx.fillStyle='#000';
-    ctx.beginPath(); ctx.arc(0,-this.size*0.5,3,0,TWO_PI); ctx.fill();
-
-    // Hat
-    ctx.fillStyle='#3a2010';
-    ctx.fillRect(-this.size*0.4,-this.size*0.75,this.size*0.8,8);
-    ctx.fillRect(-this.size*0.25,-this.size*0.75-30,this.size*0.5,32);
-
-    ctx.restore();
-    this.drawHpBar(sx,sy);
-    // Boss hp bar (big)
-    const bw=300, bh=18;
-    const bx=canvas.width/2-bw/2, by=canvas.height-60;
-    ctx.fillStyle='rgba(0,0,0,0.7)';
-    ctx.fillRect(bx-4,by-4,bw+8,bh+8);
-    ctx.fillStyle='#550000';
-    ctx.fillRect(bx,by,bw,bh);
-    const pct=Math.max(0,this.hp/this.maxHp);
-    ctx.fillStyle=pct>0.5?'#e74c3c':pct>0.25?'#e67e22':'#ff0000';
-    ctx.fillRect(bx,by,bw*pct,bh);
-    ctx.fillStyle='#fff';
-    ctx.font='bold 13px sans-serif';
-    ctx.textAlign='center';
-    ctx.fillText(`FARMER JIM — ${Math.ceil(this.hp)} / ${this.maxHp}`,canvas.width/2,by+13);
-  }
+function makeRuneMesh(type) {
+  const c = RUNE_COLORS[type] || 0xffffff;
+  const g = new THREE.Group();
+  g.add(M(new THREE.OctahedronGeometry(0.22), bmat(c)));
+  const wf = M(new THREE.OctahedronGeometry(0.34), bmat(c,0.4));
+  g.add(wf);
+  return g;
 }
 
-// ---------- Chicken ----------
-class Chicken {
-  constructor(x,y,gender){
-    this.x=x; this.y=y;
-    this.gender=gender; // 'hen'|'rooster'
-    this.transform=null; // null | 'air'|'earth'|'water'|'fire'
-    this.runesFed=[];
-    this.buffLevel=0;
-    this.following=false;
-    this.maxHp=40; this.hp=40;
-    this.dead=false;
-    this.angle=0;
-    this.attackCooldown=0;
-    this.target=null;
-    this.wanderTimer=rndI(60,180);
-    this.wx=x+rnd(-60,60); this.wy=y+rnd(-60,60);
-    this.id=Math.random().toString(36).slice(2,8);
-    this.label = gender==='hen'?'Hen':'Rooster';
-  }
-  get speed(){ return (this.transform ? CHICKEN_TRANSFORM[this.transform].speed : 1.6)*(1+this.buffLevel*0.1); }
-  get dmg(){   return (this.transform ? CHICKEN_TRANSFORM[this.transform].dmg   : 8)*(1+this.buffLevel*0.3); }
-  get atkRange(){ return this.transform ? CHICKEN_TRANSFORM[this.transform].atkRange : 45; }
-  get isProjectile(){ return this.transform ? CHICKEN_TRANSFORM[this.transform].projectile : false; }
-  get size(){ return (12+(this.gender==='rooster'?2:0))*(1+this.buffLevel*0.2); }
-  get color(){ return this.transform ? CHICKEN_TRANSFORM[this.transform].color : (this.gender==='rooster'?'#ffcc44':'#ffe080'); }
-
-  update(player,enemies,projectiles){
-    if(this.dead) return;
-    if(this.following){
-      const d=dist(this,player);
-      if(d>80){
-        const [nx,ny]=norm(player.x-this.x,player.y-this.y);
-        this.x+=nx*this.speed;
-        this.y+=ny*this.speed;
-        this.angle=Math.atan2(player.y-this.y,player.x-this.x);
-      }
-      // Attack nearest enemy
-      let nearest=null,nearD=this.atkRange;
-      for(const e of enemies){
-        if(e.dead) continue;
-        const d=dist(this,e);
-        if(d<nearD){ nearD=d; nearest=e; }
-      }
-      if(nearest && this.attackCooldown<=0){
-        this.attackCooldown=40;
-        if(this.isProjectile){
-          const PCOL={air:'#87CEEB',earth:'#8B6914',water:'#4169E1',fire:'#FF4500'};
-          const [nx,ny]=norm(nearest.x-this.x,nearest.y-this.y);
-          projectiles.push(new Projectile(this.x,this.y,nx,ny,5,this.dmg,PCOL[this.transform]||'#fff','chicken'));
-        } else {
-          nearest.takeDamage(this.dmg);
-        }
-      }
-    } else {
-      // Wander
-      this.wanderTimer--;
-      if(this.wanderTimer<=0){
-        this.wx=this.x+rnd(-100,100);
-        this.wy=this.y+rnd(-100,100);
-        this.wanderTimer=rndI(80,200);
-      }
-      const d=dist({x:this.wx,y:this.wy},{x:this.x,y:this.y});
-      if(d>8){
-        const [nx,ny]=norm(this.wx-this.x,this.wy-this.y);
-        this.x+=nx*0.7;
-        this.y+=ny*0.7;
-        this.angle=Math.atan2(this.wy-this.y,this.wx-this.x);
-      }
-    }
-    if(this.attackCooldown>0) this.attackCooldown--;
-  }
-
-  draw(sx,sy){
-    const s=this.size;
-    const t=this.transform;
-    const col=this.color;
-    const bs=1+this.buffLevel*0.15;
-
-    ctx.save();
-    ctx.translate(sx,sy);
-    ctx.rotate(this.angle);
-    ctx.scale(bs,bs);
-
-    // Wings
-    const wScale=t?CHICKEN_TRANSFORM[t].wingScale:1.0;
-    ctx.fillStyle=t?'rgba(255,255,255,0.3)':'rgba(255,255,255,0.15)';
-    ctx.beginPath();
-    ctx.ellipse(-s*0.2,-s*0.8,s*0.5*wScale,s*0.3,Math.PI*0.2,0,TWO_PI);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.ellipse(s*0.2,-s*0.8,s*0.5*wScale,s*0.3,-Math.PI*0.2,0,TWO_PI);
-    ctx.fill();
-
-    // Body
-    ctx.beginPath();
-    ctx.ellipse(0,0,s,s*1.1,0,0,TWO_PI);
-    ctx.fillStyle=col;
-    ctx.fill();
-
-    // Fire effect
-    if(t==='fire'){
-      for(let i=0;i<4;i++){
-        const fa=i*Math.PI/2+Date.now()/200;
-        ctx.beginPath();
-        ctx.arc(Math.cos(fa)*s*0.7,Math.sin(fa)*s*0.7,4,0,TWO_PI);
-        ctx.fillStyle=`hsl(${20+i*10},100%,${50+i*5}%)`;
-        ctx.fill();
-      }
-    }
-    // Water droplets
-    if(t==='water'){
-      ctx.fillStyle='rgba(100,150,255,0.4)';
-      ctx.beginPath();
-      ctx.arc(-s*0.6,0,4,0,TWO_PI);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(s*0.6,0,4,0,TWO_PI);
-      ctx.fill();
-    }
-    // Earth rocky patches
-    if(t==='earth'){
-      ctx.fillStyle='#6b5a30';
-      ctx.fillRect(-s*0.4,-s*0.3,s*0.3,s*0.3);
-      ctx.fillRect(s*0.1,s*0.1,s*0.3,s*0.3);
-    }
-    // Air Chicken — wind rings
-    if(t==='air'){
-      ctx.strokeStyle='rgba(135,206,235,0.5)';
-      ctx.lineWidth=2;
-      ctx.beginPath();
-      ctx.arc(0,0,s*1.3,0,TWO_PI);
-      ctx.stroke();
-    }
-
-    // Head
-    ctx.beginPath();
-    ctx.arc(s*0.6,0,s*0.5,0,TWO_PI);
-    ctx.fillStyle=col;
-    ctx.fill();
-
-    // Buff muscles
-    if(this.buffLevel>0){
-      ctx.fillStyle='rgba(255,200,0,0.5)';
-      ctx.beginPath();
-      ctx.ellipse(-s*0.7,0,s*0.35,s*0.25,Math.PI*0.3,0,TWO_PI);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.ellipse(s*0.5,s*0.5,s*0.3,s*0.2,-Math.PI*0.3,0,TWO_PI);
-      ctx.fill();
-    }
-
-    // Comb
-    ctx.fillStyle='#e00';
-    ctx.beginPath();
-    ctx.moveTo(s*0.4,-s*0.35);
-    ctx.lineTo(s*0.5,-s*0.65);
-    ctx.lineTo(s*0.6,-s*0.35);
-    ctx.lineTo(s*0.7,-s*0.6);
-    ctx.lineTo(s*0.8,-s*0.35);
-    ctx.fill();
-
-    // Eye
-    ctx.fillStyle='#000';
-    ctx.beginPath();
-    ctx.arc(s*0.85,-s*0.05,s*0.1,0,TWO_PI);
-    ctx.fill();
-
-    // Beak
-    ctx.fillStyle='#e8a020';
-    ctx.beginPath();
-    ctx.moveTo(s*1.05,-s*0.05);
-    ctx.lineTo(s*1.35,0);
-    ctx.lineTo(s*1.05,s*0.1);
-    ctx.fill();
-
-    // Rooster tail
-    if(this.gender==='rooster'){
-      ctx.fillStyle='#cc4400';
-      ctx.beginPath();
-      ctx.moveTo(-s*0.9,0);
-      ctx.lineTo(-s*1.5,-s*0.5);
-      ctx.lineTo(-s*1.1,0);
-      ctx.lineTo(-s*1.5,s*0.3);
-      ctx.lineTo(-s*0.9,0);
-      ctx.fill();
-    }
-
-    ctx.restore();
-    this.drawHpBar(sx,sy,s);
-  }
-  drawHpBar(sx,sy,s){
-    if(this.hp>=this.maxHp) return;
-    const bw=s*2+8, bh=3;
-    ctx.fillStyle='#550000';
-    ctx.fillRect(sx-bw/2,sy-s-8,bw,bh);
-    ctx.fillStyle='#22ee44';
-    ctx.fillRect(sx-bw/2,sy-s-8,bw*(this.hp/this.maxHp),bh);
-  }
-  takeDamage(dmg){
-    this.hp-=dmg;
-    if(this.hp<=0){ this.dead=true; return true; }
-    return false;
-  }
-  feedRune(type){
-    if(this.transform) return false; // already transformed
-    if(!RUNE_TYPES.includes(type)) return false;
-    this.transform=type;
-    this.runesFed.push(type);
-    this.following=true;
-    this.maxHp=80+(this.buffLevel*20);
-    this.hp=this.maxHp;
-    this.label=CHICKEN_TRANSFORM[type].label;
-    return true;
-  }
-  applyBuff(){
-    this.buffLevel++;
-    this.maxHp+=30;
-    this.hp=Math.min(this.hp+30,this.maxHp);
-  }
+function makeEggMesh() {
+  const e = M(sphG(0.18,8), lmat(0xffe8b0));
+  e.scale.y = 1.4; e.castShadow = true;
+  return e;
 }
 
-// ---------- Egg ----------
-class Egg {
-  constructor(x,y){
-    this.x=x; this.y=y;
-    this.dead=false; this.size=8;
-  }
-  draw(sx,sy){
-    ctx.save();
-    ctx.translate(sx,sy);
-    ctx.beginPath();
-    ctx.ellipse(0,0,this.size*0.7,this.size,0,0,TWO_PI);
-    ctx.fillStyle='#ffe8b0';
-    ctx.fill();
-    ctx.strokeStyle='rgba(0,0,0,0.2)';
-    ctx.lineWidth=1;
-    ctx.stroke();
-    ctx.restore();
-  }
+function makeProjectile(color) {
+  const g = new THREE.Group();
+  g.add(M(sphG(0.18,6), bmat(color)));
+  const glow = M(sphG(0.28,6), bmat(color,0.35)); g.add(glow);
+  return g;
 }
 
 // ============================================================
-// WORLD TILES (decorative)
+// WORLD SCENE BUILDERS
 // ============================================================
-function drawFarmTile(ctx,wx,wy,cameraX,cameraY){
-  const sx=wx-cameraX+canvas.width/2;
-  const sy=wy-cameraY+canvas.height/2;
-  // Only draw if on screen
-  if(sx<-100||sx>canvas.width+100||sy<-100||sy>canvas.height+100) return;
+
+function addLights(scene, ambCol, ambInt, sunCol, sunInt, sunX, sunY, sunZ) {
+  scene.add(new THREE.AmbientLight(ambCol, ambInt));
+  const sun = new THREE.DirectionalLight(sunCol, sunInt);
+  sun.position.set(sunX, sunY, sunZ);
+  sun.castShadow = true;
+  sun.shadow.mapSize.width = 1024; sun.shadow.mapSize.height = 1024;
+  sun.shadow.camera.near = 0.5; sun.shadow.camera.far = 300;
+  sun.shadow.camera.left = -100; sun.shadow.camera.right = 100;
+  sun.shadow.camera.top = 100; sun.shadow.camera.bottom = -100;
+  scene.add(sun);
 }
 
-// ============================================================
-// PLAYER
-// ============================================================
-class Player {
-  constructor(){
-    this.x=0; this.y=0;
-    this.maxHp=100; this.hp=100;
-    this.speed=3;
-    this.size=16;
-    this.dead=false;
-    this.angle=0;
-    this.attackCooldown=0;
-    this.atkRange=70;
-    this.dmg=25;
-    this.invincible=0;
-    this.color='#4488ff';
+function addTree(scene, x, z) {
+  const trunk = M(cylG(0.22,0.18,1.4,8), lmat(0x5a3010));
+  trunk.position.set(x,0.7,z); trunk.castShadow=true; scene.add(trunk);
+  const top = M(sphG(rnd(1.0,1.6),7), lmat(0x1a5a10));
+  top.position.set(x,2.2+rnd(-0.3,0.3),z); top.castShadow=true; scene.add(top);
+  const top2 = M(sphG(rnd(0.8,1.2),6), lmat(0x2a7a20));
+  top2.position.set(x+rnd(-0.4,0.4),2.8+rnd(-0.2,0.2),z+rnd(-0.4,0.4)); top2.castShadow=true; scene.add(top2);
+}
+
+function addPortalGate(scene, x, z, rotY, label, color) {
+  const arc = new THREE.Group();
+  // Two posts
+  for (const xs of [-1.2,1.2]) {
+    addM(arc, cylG(0.15,0.15,3.5,8), lmat(color), xs,1.75,0);
   }
-  takeDamage(dmg){
-    if(this.invincible>0) return;
-    this.hp-=dmg;
-    this.invincible=30;
-    if(this.hp<=0){ this.hp=0; this.dead=true; }
+  // Top bar
+  addM(arc, cylG(0.15,0.15,2.55,8), lmat(color), 0,3.55,0, 0,0,Math.PI/2);
+  // Glow panel
+  const panel = M(boxG(2.4,2.9,0.1), new THREE.MeshBasicMaterial({color, transparent:true, opacity:0.25, side:THREE.DoubleSide}));
+  panel.position.set(0,1.8,0); arc.add(panel);
+  arc.position.set(x,0,z);
+  arc.rotation.y = rotY;
+  scene.add(arc);
+  // Label sprite (using a simple mesh + text approximation via colored box)
+  const sign = M(boxG(2.2,0.4,0.05), lmat(color));
+  sign.position.set(x,4.2,z+Math.sin(rotY)*0.1); scene.add(sign);
+}
+
+// ── FARM SCENE ───────────────────────────────────────────────
+function buildFarmScene() {
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x87ceeb);
+  scene.fog = new THREE.Fog(0x87ceeb, 80, 220);
+  addLights(scene, 0xffffff,0.55, 0xffffff,0.9, 60,100,40);
+
+  // Ground
+  const gnd = M(new THREE.PlaneGeometry(260,260,1,1), new THREE.MeshLambertMaterial({color:0x2d6a2d}));
+  gnd.rotation.x = -Math.PI/2; gnd.receiveShadow = true; scene.add(gnd);
+
+  // Grass patches
+  for (let i=0;i<80;i++) {
+    const p = M(boxG(rnd(0.3,1.0),0.06,rnd(0.3,1.0)), lmat(0x1a5a10));
+    p.position.set(rnd(-100,100),0.03,rnd(-100,100)); scene.add(p);
   }
-  draw(sx,sy){
-    ctx.save();
-    ctx.translate(sx,sy);
-    // Flash when invincible
-    if(this.invincible>0 && Math.floor(this.invincible/4)%2===1){
-      ctx.globalAlpha=0.4;
+
+  // Barn (at x=18, z=-10)
+  const barn = new THREE.Group();
+  addM(barn, boxG(8,5,6),   lmat(0x8B2500), 0,2.5,0);
+  addM(barn, boxG(8.4,0.4,6.4), lmat(0x6B1500), 0,5.2,0);
+  // Roof (triangular prism approx with tapered box)
+  const roof = M(new THREE.CylinderGeometry(0,4.6,3,4,1), lmat(0xcc3300));
+  roof.position.set(0,6.5,0); roof.rotation.y=Math.PI/4; barn.add(roof);
+  addM(barn, boxG(2.2,3,0.3), lmat(0x4a1a00), 0,1.5,3.15); // door
+  barn.position.set(18,0,-10); scene.add(barn);
+
+  // Fences
+  for (let i=-6;i<=6;i++) {
+    for (const zOff of [-28,28]) {
+      addM(scene, cylG(0.1,0.1,1.8,6), lmat(0x8B6914), i*4.5,0.9,zOff);
+      if (i<6) { addM(scene, boxG(4.5,0.1,0.1), lmat(0x8B6914), i*4.5+2.25,1.2,zOff); }
     }
-    ctx.rotate(this.angle);
-
-    // Body
-    ctx.beginPath();
-    ctx.arc(0,0,this.size,0,TWO_PI);
-    ctx.fillStyle='#4488ff';
-    ctx.fill();
-    // Torso
-    ctx.fillStyle='#336699';
-    ctx.fillRect(-this.size*0.4,this.size*0.1,this.size*0.8,this.size*0.7);
-    // Head
-    ctx.beginPath();
-    ctx.arc(this.size*0.5,-this.size*0.1,this.size*0.55,0,TWO_PI);
-    ctx.fillStyle='#ffd090';
-    ctx.fill();
-    // Hair
-    ctx.fillStyle='#553300';
-    ctx.beginPath();
-    ctx.arc(this.size*0.5,-this.size*0.35,this.size*0.45,Math.PI,TWO_PI);
-    ctx.fill();
-    // Eye
-    ctx.fillStyle='#000';
-    ctx.beginPath();
-    ctx.arc(this.size*0.78,-this.size*0.1,2.5,0,TWO_PI);
-    ctx.fill();
-    // Sword/weapon indicator
-    ctx.fillStyle='#ccc';
-    ctx.fillRect(this.size*0.9,-3,this.size*0.8,5);
-    ctx.fillStyle='#8B6914';
-    ctx.fillRect(this.size*0.85,-5,8,9);
-
-    ctx.restore();
-    if(this.invincible>0) ctx.globalAlpha=1;
+    for (const xOff of [-28,28]) {
+      addM(scene, cylG(0.1,0.1,1.8,6), lmat(0x8B6914), xOff,0.9,i*4.5);
+      if (i<6) { addM(scene, boxG(0.1,0.1,4.5), lmat(0x8B6914), xOff,1.2,i*4.5+2.25); }
+    }
   }
+
+  // Trees around farm
+  for (let i=0;i<28;i++) {
+    const a=rnd(0,Math.PI*2), r=rnd(32,70);
+    addTree(scene, Math.cos(a)*r, Math.sin(a)*r);
+  }
+
+  // Hay bales
+  for (let i=0;i<8;i++) {
+    const hb = M(cylG(0.9,0.9,1.1,12), lmat(0xc8a020));
+    hb.rotation.z=Math.PI/2; hb.position.set(rnd(-22,22),0.55,rnd(-22,22)); hb.castShadow=true; scene.add(hb);
+  }
+
+  // Dirt path to barn
+  addM(scene, boxG(2.5,0.02,12), lmat(0x8B7355), 8,0.01,-4);
+
+  // Water trough
+  addM(scene, boxG(3,0.5,0.8), lmat(0x8B4513), -12,0.25,-8);
+  addM(scene, boxG(2.8,0.3,0.6), lmat(0x4169e1), -12,0.45,-8, -0.05,0,0);
+
+  // Zone portals (each unlockable)
+  addPortalGate(scene, 0, -70, 0, 'Gym',      0xffd700); // north
+  addPortalGate(scene, 70, 0,  Math.PI/2, 'Beach',    0x00aaff); // east
+  addPortalGate(scene, 0,  70, Math.PI, 'Mountain', 0x888888); // south
+  addPortalGate(scene, -70,0, -Math.PI/2,'Volcano',  0xff4400); // west
+
+  scene.userData.portals = [
+    { x:0,  z:-70, zone:'gym',      radius:4 },
+    { x:70, z:0,   zone:'beach',    radius:4 },
+    { x:0,  z:70,  zone:'mountain', radius:4 },
+    { x:-70,z:0,   zone:'volcano',  radius:4 },
+  ];
+
+  return scene;
+}
+
+// ── GYM SCENE ────────────────────────────────────────────────
+function buildGymScene() {
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x303030);
+  scene.fog = new THREE.Fog(0x303030, 40, 120);
+  addLights(scene, 0xffffff,0.8, 0xffffff,0.7, 0,30,10);
+  // Overhead fluorescent strips
+  for (let i=-2;i<=2;i++) {
+    const strip = M(boxG(0.3,0.05,8), bmat(0xffffcc,0.9));
+    strip.position.set(i*8,9,0); scene.add(strip);
+  }
+
+  // Floor
+  const fl = M(new THREE.PlaneGeometry(80,80,1,1), new THREE.MeshLambertMaterial({color:0x555555}));
+  fl.rotation.x=-Math.PI/2; fl.receiveShadow=true; scene.add(fl);
+  // Rubber mat lines
+  for (let i=-3;i<=3;i++) {
+    addM(scene, boxG(0.1,0.02,78), lmat(0x222222), i*10,0.01,0);
+    addM(scene, boxG(78,0.02,0.1), lmat(0x222222), 0,0.01,i*10);
+  }
+
+  // Walls
+  for (const [wx,wz,ww,wh,wd] of [
+    [0,40,80,10,0.5],[0,-40,80,10,0.5],[40,0,0.5,10,80],[-40,0,0.5,10,80]
+  ]) {
+    addM(scene, boxG(ww,wh,wd), lmat(0x444444), wx,5,wz);
+  }
+
+  // Weight racks
+  for (let row=0;row<3;row++) {
+    for (let col=0;col<4;col++) {
+      const bar = M(cylG(0.06,0.06,2.0,8), lmat(0x888888));
+      bar.rotation.z=Math.PI/2; bar.position.set(-15+col*10,1.2,-20+row*8); scene.add(bar);
+      for (const xs of [-0.7,0.7]) {
+        const wt = M(cylG(0.5,0.5,0.3,12), lmat(row===0?0xff4444:row===1?0x4444ff:0x44ff44));
+        wt.rotation.z=Math.PI/2; wt.position.set(-15+col*10+xs,1.2,-20+row*8); scene.add(wt);
+      }
+      // Rack stand
+      for (const xs2 of [-0.8,0.8]) addM(scene, cylG(0.06,0.06,1.2,6), lmat(0x666666), -15+col*10+xs2,0.6,-20+row*8);
+    }
+  }
+
+  // Bench press benches
+  for (let i=0;i<3;i++) {
+    const bench = M(boxG(0.6,0.2,2.2), lmat(0x883300));
+    bench.position.set(8+i*8,0.75,10); scene.add(bench);
+    const legs = M(boxG(0.55,0.65,0.1), lmat(0x555555));
+    legs.position.set(8+i*8,0.32,10); scene.add(legs);
+  }
+
+  // Pull-up bar frames
+  for (let i=0;i<2;i++) {
+    addM(scene, cylG(0.08,0.08,4.5,8), lmat(0x555555), -25+i*8,2.25,-10);
+    addM(scene, cylG(0.08,0.08,4.5,8), lmat(0x555555), -25+i*8,2.25,-15);
+    addM(scene, cylG(0.06,0.06,4.5,8), lmat(0x777777), -25+i*8+2.25,4.5,-12.5, 0,0,Math.PI/2);
+  }
+
+  // Punching bags
+  for (let i=0;i<3;i++) {
+    addM(scene, cylG(0.35,0.28,1.4,8), lmat(0xcc3300), 15,3.2,-15+i*7);
+    addM(scene, cylG(0.04,0.04,2.5,6), lmat(0x888888), 15,5.0,-15+i*7);
+  }
+
+  // Mirror wall
+  addM(scene, boxG(40,8,0.1), new THREE.MeshLambertMaterial({color:0xaaccff,metalness:0.8}), 0,4,39.9);
+
+  // Motivational sign (colored box)
+  addM(scene, boxG(10,1.5,0.2), lmat(0xcc0000), 0,8.5,-39);
+
+  // Return portal
+  addPortalGate(scene, 0,35, Math.PI,'Farm', 0x00ff88);
+  scene.userData.portals = [{ x:0, z:35, zone:'farm', radius:4 }];
+  // Enemy spawn points
+  scene.userData.enemyZone = 'gym';
+  scene.userData.bounds = 36;
+  return scene;
+}
+
+// ── BEACH SCENE ──────────────────────────────────────────────
+function buildBeachScene() {
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x87ceef);
+  scene.fog = new THREE.Fog(0xaaddff, 60, 180);
+  addLights(scene, 0xfff8e0,0.65, 0xffee88,1.0, 80,100,20);
+
+  // Sand ground
+  const sand = M(new THREE.PlaneGeometry(120,80,1,1), new THREE.MeshLambertMaterial({color:0xe8d080}));
+  sand.rotation.x=-Math.PI/2; sand.receiveShadow=true; scene.add(sand);
+
+  // Water plane
+  const water = M(new THREE.PlaneGeometry(120,60,1,1), new THREE.MeshLambertMaterial({color:0x1a7aaa,transparent:true,opacity:0.85}));
+  water.rotation.x=-Math.PI/2; water.position.set(0,0.04,55); scene.add(water);
+
+  // Sandy bumps/dunes
+  for (let i=0;i<20;i++) {
+    const dune = M(sphG(rnd(1.5,4),7), lmat(0xd4b860));
+    dune.scale.y=0.3; dune.position.set(rnd(-50,50),0.3,rnd(-30,20)); dune.castShadow=true; scene.add(dune);
+  }
+
+  // Palm trees
+  for (let i=0;i<8;i++) {
+    const x=rnd(-45,45), z=rnd(-30,15);
+    const trunk = M(cylG(0.18,0.12,4.5,8), lmat(0x8B6340));
+    trunk.position.set(x,2.25,z); trunk.rotation.z=rnd(-0.2,0.2); trunk.castShadow=true; scene.add(trunk);
+    for (let l=0;l<5;l++) {
+      const leaf = M(new THREE.CylinderGeometry(0.05,0.6,2.2,5), lmat(0x1a8820));
+      leaf.position.set(x+Math.cos(l*Math.PI*0.4)*1.1,4.8,z+Math.sin(l*Math.PI*0.4)*1.1);
+      leaf.rotation.set(Math.PI*0.45,l*Math.PI*0.4,0); leaf.castShadow=true; scene.add(leaf);
+    }
+  }
+
+  // Beach umbrellas
+  for (let i=0;i<5;i++) {
+    const x=rnd(-35,35), z=rnd(-25,5);
+    addM(scene, cylG(0.06,0.06,2.5,6), lmat(0x885500), x,1.25,z);
+    addM(scene, coneG(2.2,0.8,8), lmat(i%2===0?0xff4444:0x4488ff), x,3.2,z);
+  }
+
+  // Beach chairs
+  for (let i=0;i<4;i++) {
+    addM(scene, boxG(0.7,0.1,1.4), lmat(0xddaa44), -20+i*10,0.35,-10, -0.3,0,0);
+  }
+
+  // Sandcastles (from game spec)
+  for (let i=0;i<3;i++) {
+    const cx=rnd(-30,30), cz=rnd(-20,10);
+    addM(scene, cylG(1.2,1.0,1.0,8), lmat(0xe0c870), cx,0.5,cz);
+    addM(scene, coneG(1.1,0.8,8), lmat(0xd4b85a), cx,1.3,cz);
+    for (let j=0;j<4;j++) {
+      const a=j*Math.PI/2;
+      addM(scene, cylG(0.35,0.3,0.75,8), lmat(0xe0c870), cx+Math.cos(a)*1.2,0.37,cz+Math.sin(a)*1.2);
+      addM(scene, coneG(0.32,0.35,8), lmat(0xd4b85a), cx+Math.cos(a)*1.2,0.95,cz+Math.sin(a)*1.2);
+    }
+  }
+
+  // Driftwood
+  for (let i=0;i<6;i++) {
+    const log = M(cylG(0.12,0.08,rnd(1.5,3.5),6), lmat(0x8B7355));
+    log.position.set(rnd(-40,40),0.1,rnd(-28,12));
+    log.rotation.set(0,rnd(0,Math.PI),rnd(-0.1,0.3)); log.castShadow=true; scene.add(log);
+  }
+
+  addPortalGate(scene, -50,0, Math.PI/2,'Farm', 0x00ff88);
+  scene.userData.portals = [{ x:-50, z:0, zone:'farm', radius:4 }];
+  scene.userData.enemyZone = 'beach';
+  scene.userData.bounds = 55;
+  return scene;
+}
+
+// ── MOUNTAIN SCENE ───────────────────────────────────────────
+function buildMountainScene() {
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x7a8fa0);
+  scene.fog = new THREE.Fog(0x9aaabb, 50, 180);
+  addLights(scene, 0xbbccdd,0.7, 0xeeeeff,0.8, -30,80,40);
+
+  // Heightfield terrain
+  const segments = 40;
+  const geo = new THREE.PlaneGeometry(160,160,segments,segments);
+  geo.rotateX(-Math.PI/2);
+  const pos = geo.attributes.position;
+  for (let i=0; i<pos.count; i++) {
+    const x = pos.getX(i), z = pos.getZ(i);
+    const h = Math.max(0,
+      Math.sin(x/22)*6 + Math.cos(z/18)*5 +
+      Math.sin(x/10+1)*3 + Math.cos(z/12+2)*3 +
+      (Math.abs(x)+Math.abs(z))/40 +
+      Math.random()*1.5
+    );
+    pos.setY(i, h);
+  }
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
+  const terrain = M(geo, new THREE.MeshLambertMaterial({color:0x7a7060}));
+  terrain.receiveShadow = true; terrain.castShadow = true;
+  scene.add(terrain);
+
+  // Snow caps on high areas
+  const snowGeo = new THREE.PlaneGeometry(160,160,segments,segments);
+  snowGeo.rotateX(-Math.PI/2);
+  const sp = snowGeo.attributes.position;
+  for (let i=0; i<pos.count; i++) {
+    const x = pos.getX(i), z = pos.getZ(i);
+    const h = pos.getY(i);
+    sp.setX(i,x); sp.setY(i, h > 12 ? h + 0.05 : -999); sp.setZ(i,z);
+  }
+  sp.needsUpdate = true;
+  snowGeo.computeVertexNormals();
+  const snow = M(snowGeo, new THREE.MeshLambertMaterial({color:0xffffff}));
+  scene.add(snow);
+
+  // Rocks
+  for (let i=0;i<40;i++) {
+    const x=rnd(-70,70), z=rnd(-70,70);
+    const rock = M(sphG(rnd(0.5,2.5),6), lmat(0x666655));
+    rock.scale.set(rnd(0.6,1.8),rnd(0.4,0.9),rnd(0.6,1.8));
+    rock.position.set(x,0.2,z); rock.castShadow=true; scene.add(rock);
+  }
+
+  // Pine trees on slopes
+  for (let i=0;i<20;i++) {
+    const x=rnd(-60,60), z=rnd(-60,60);
+    const trunk = M(cylG(0.14,0.1,2.0,8), lmat(0x5a3010));
+    trunk.position.set(x,1.0,z); trunk.castShadow=true; scene.add(trunk);
+    for (let l=0;l<3;l++) {
+      const lvl = M(coneG(1.2-l*0.3,1.4,7), lmat(0x1a4a10));
+      lvl.position.set(x,2.3+l*0.9,z); lvl.castShadow=true; scene.add(lvl);
+    }
+  }
+
+  // Cliff faces (tall boxes)
+  for (let i=0;i<8;i++) {
+    const a=rnd(0,Math.PI*2), r=rnd(30,55);
+    const cliff = M(boxG(rnd(4,12),rnd(8,18),rnd(2,5)), lmat(0x5a5040));
+    cliff.position.set(Math.cos(a)*r, rnd(2,7), Math.sin(a)*r); cliff.castShadow=true; scene.add(cliff);
+  }
+
+  // Mining rocks (interactive visual)
+  for (let i=0;i<10;i++) {
+    const r = M(sphG(0.8,6), lmat(0x6a5830));
+    r.scale.set(rnd(0.8,1.8),rnd(0.6,1.0),rnd(0.8,1.8));
+    r.position.set(rnd(-40,40),0.35,rnd(-40,40)); r.castShadow=true; scene.add(r);
+  }
+
+  addPortalGate(scene, 0,60, Math.PI,'Farm', 0x00ff88);
+  scene.userData.portals = [{ x:0, z:60, zone:'farm', radius:4 }];
+  scene.userData.enemyZone = 'mountain';
+  scene.userData.bounds = 70;
+  return scene;
+}
+
+// ── VOLCANO SCENE ────────────────────────────────────────────
+function buildVolcanoScene() {
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x1a0808);
+  scene.fog = new THREE.Fog(0x3a1808, 40, 140);
+  addLights(scene, 0xff4400,0.4, 0xff6600,0.9, 0,60,0);
+  // Lava glow from below
+  const lavaLight = new THREE.PointLight(0xff4400, 2, 60);
+  lavaLight.position.set(0,1,0); scene.add(lavaLight);
+
+  // Dark rocky ground
+  const gnd = M(new THREE.PlaneGeometry(140,140,1,1), new THREE.MeshLambertMaterial({color:0x2a1a0a}));
+  gnd.rotation.x=-Math.PI/2; gnd.receiveShadow=true; scene.add(gnd);
+
+  // Volcano cone (central)
+  const cone1 = M(coneG(22,28,16), lmat(0x3a2010));
+  cone1.position.set(0,14,0); cone1.castShadow=true; scene.add(cone1);
+  // Inner crater
+  const crater = M(coneG(6,4,12), lmat(0xff4400));
+  crater.position.set(0,28.5,0); crater.rotation.y=0.2; scene.add(crater);
+  // Lava top glow
+  const lavaCap = M(new THREE.CircleGeometry(5.5,12), new THREE.MeshBasicMaterial({color:0xff6600}));
+  lavaCap.rotation.x=-Math.PI/2; lavaCap.position.set(0,28.2,0); scene.add(lavaCap);
+
+  // Lava rivers
+  for (let i=0;i<5;i++) {
+    const a=i*Math.PI*0.4+0.2;
+    const river = M(boxG(1.5,0.08,rnd(12,22)), new THREE.MeshBasicMaterial({color:0xff5500,transparent:true,opacity:0.85}));
+    river.rotation.y=a; river.position.set(Math.cos(a)*12,0.08,Math.sin(a)*12); scene.add(river);
+  }
+
+  // Lava pools
+  for (let i=0;i<8;i++) {
+    const a=rnd(0,Math.PI*2), r=rnd(18,50);
+    const pool = M(new THREE.CircleGeometry(rnd(2,5),10), new THREE.MeshBasicMaterial({color:0xff4400,transparent:true,opacity:0.8}));
+    pool.rotation.x=-Math.PI/2; pool.position.set(Math.cos(a)*r,0.06,Math.sin(a)*r); scene.add(pool);
+    // Pool glow
+    const glow = new THREE.PointLight(0xff3300, 0.8, 12);
+    glow.position.set(Math.cos(a)*r,1,Math.sin(a)*r); scene.add(glow);
+  }
+
+  // Volcanic rocks
+  for (let i=0;i<50;i++) {
+    const rock = M(sphG(rnd(0.3,1.8),5), lmat(0x2a1a0a));
+    rock.scale.set(rnd(0.5,2),rnd(0.3,0.8),rnd(0.5,2));
+    rock.position.set(rnd(-60,60),0.2,rnd(-60,60)); rock.castShadow=true; scene.add(rock);
+  }
+
+  // Steam/smoke pillars (static cones approximation)
+  for (let i=0;i<6;i++) {
+    const a=rnd(0,Math.PI*2), r=rnd(8,20);
+    const steam = M(coneG(1.2,5,6), new THREE.MeshBasicMaterial({color:0x888888,transparent:true,opacity:0.2}));
+    steam.position.set(Math.cos(a)*r, 5, Math.sin(a)*r); scene.add(steam);
+  }
+
+  // Obsidian pillars
+  for (let i=0;i<12;i++) {
+    const a=rnd(0,Math.PI*2), r=rnd(22,55);
+    const pillar = M(cylG(rnd(0.4,1.0),rnd(0.2,0.7),rnd(2,8),5), lmat(0x111111));
+    pillar.position.set(Math.cos(a)*r,rnd(1,4),Math.sin(a)*r); pillar.rotation.z=rnd(-0.2,0.2); pillar.castShadow=true; scene.add(pillar);
+  }
+
+  addPortalGate(scene, 55,0, -Math.PI/2,'Farm', 0x00ff88);
+  scene.userData.portals = [{ x:55, z:0, zone:'farm', radius:4 }];
+  scene.userData.enemyZone = 'volcano';
+  scene.userData.bounds = 60;
+  return scene;
 }
 
 // ============================================================
-// MAIN GAME OBJECT
+// GAME STATE
 // ============================================================
 const G = {
   running: false,
   day: 1,
-  timeOfDay: 0,      // 0..1 per day  (advances with Z or auto in boss)
+  runes: {},
+  unlockedZones: { farm:true, gym:false, beach:false, mountain:false, volcano:false },
+  runesFedByType: { air:0, earth:0, water:0, fire:0 },
+  currentZone: 'farm',
+  isBossFight: false,
+  victoryActive: false,
+
+  // Scenes
+  scenes: {},
+  activeScene: null,
+
+  // Entities (per zone)
+  player: null,
   chickens: [],
   eggs: [],
   enemies: [],
   projectiles: [],
-  runes: {},
   runePickups: [],
-  player: null,
-  camera: {x:0,y:0},
-  unlockedAreas: { farm:true, gym:false, beach:false, mountain:false, volcano:false },
-  areaRuneFed: { air:0, earth:0, water:0, fire:0 },
-  currentArea: 'farm',
-  isBossFight: false,
-  boss: null,
-  victoryActive: false,
-  victoryFrame: 0,
-  msgQueue: [],
+
+  // Player combat target (for chicken assist)
+  playerTarget: null,
+
+  // HUD / UI
   msgEl: document.getElementById('msg-box'),
-  lastTime: 0,
   animId: null,
-  farmObjects: [],
-  interactTarget: null,
+  lastTime: 0,
 
-  // Rune counts
-  initRunes(){
-    ALL_RUNES.forEach(r=>{ this.runes[r]=0; });
-  },
+  // ── INIT ──────────────────────────────────────────────────
+  initRunes() { ALL_RUNES.forEach(r => { this.runes[r] = 0; }); },
 
-  start(){
+  // ── START ─────────────────────────────────────────────────
+  start() {
     this.initRunes();
-    this.player=new Player();
-    this.day=1;
-    this.chickens=[];
-    this.eggs=[];
-    this.enemies=[];
-    this.projectiles=[];
-    this.runePickups=[];
-    this.isBossFight=false;
-    this.boss=null;
-    this.victoryActive=false;
-    this.areaRuneFed={air:0,earth:0,water:0,fire:0};
-    this.unlockedAreas={farm:true,gym:false,beach:false,mountain:false,volcano:false};
-    this.currentArea='farm';
+    this.day = 1;
+    this.chickens = [];
+    this.eggs = [];
+    this.enemies = [];
+    this.projectiles = [];
+    this.runePickups = [];
+    this.isBossFight = false;
+    this.victoryActive = false;
+    this.runesFedByType = { air:0, earth:0, water:0, fire:0 };
+    this.unlockedZones = { farm:true, gym:false, beach:false, mountain:false, volcano:false };
+    this.currentZone = 'farm';
+    this.playerTarget = null;
+
+    // Build all scenes
+    this.scenes.farm     = buildFarmScene();
+    this.scenes.gym      = buildGymScene();
+    this.scenes.beach    = buildBeachScene();
+    this.scenes.mountain = buildMountainScene();
+    this.scenes.volcano  = buildVolcanoScene();
+    this.activeScene = this.scenes.farm;
+
+    // Player
+    this.player = {
+      pos: new THREE.Vector3(0, 0, 0),
+      mesh: makePlayerMesh(),
+      hp: 100, maxHp: 100,
+      speed: 0.12,
+      size: 0.7,
+      dmg: 25,
+      atkRange: 3.5,
+      attackCooldown: 0,
+      invincible: 0,
+      dead: false,
+      facingYaw: 0,
+    };
+    this.player.mesh.position.copy(this.player.pos);
+    this.activeScene.add(this.player.mesh);
 
     // Spawn starting chickens
-    for(let i=0;i<15;i++) this.chickens.push(new Chicken(rnd(-200,200),rnd(-200,200),'hen'));
-    for(let i=0;i<15;i++) this.chickens.push(new Chicken(rnd(-200,200),rnd(-200,200),'rooster'));
+    for (let i=0;i<15;i++) this.spawnChicken('hen');
+    for (let i=0;i<15;i++) this.spawnChicken('rooster');
 
-    this.buildFarm();
-    this.spawnInitialPickups();
+    this.spawnInitialRunes();
     this.spawnEnemiesForDay();
 
     document.getElementById('start-screen').classList.add('hidden');
-    this.running=true;
-    this.msg("The chickens gather around you... 🐔","#ffe080");
-    setTimeout(()=>this.msg('"Farmer Jim is going to EAT US! Find the runes and save us!"',"#ffcc44"),2000);
+    this.running = true;
+    camYaw = 0;
+
+    this.msg('The chickens gather around you... 🐔', '#ffe080');
+    setTimeout(() => this.msg('"Farmer Jim is going to EAT US! Find the runes and save us!"', '#ffcc44'), 2200);
+
+    this.updateHUD();
     this.loop(0);
   },
 
-  buildFarm(){
-    this.farmObjects=[];
-    // Barn
-    this.farmObjects.push({type:'barn',x:150,y:-80});
-    // Fence posts
-    for(let i=-5;i<=5;i++){
-      this.farmObjects.push({type:'fence',x:i*80,y:300});
-      this.farmObjects.push({type:'fence',x:i*80,y:-320});
-      this.farmObjects.push({type:'fence',x:320,y:i*80});
-      this.farmObjects.push({type:'fence',x:-320,y:i*80});
-    }
-    // Trees around farm
-    for(let i=0;i<30;i++){
-      const angle=rnd(0,TWO_PI), r=rnd(350,600);
-      this.farmObjects.push({type:'tree',x:Math.cos(angle)*r,y:Math.sin(angle)*r});
-    }
-    // Hay bales
-    for(let i=0;i<8;i++){
-      this.farmObjects.push({type:'hay',x:rnd(-280,280),y:rnd(-280,280)});
-    }
-    // Area landmarks
-    this.farmObjects.push({type:'gym_sign',  x:AREAS.gym.x,      y:AREAS.gym.y});
-    this.farmObjects.push({type:'beach_sign', x:AREAS.beach.x,   y:AREAS.beach.y});
-    this.farmObjects.push({type:'mtn_sign',   x:AREAS.mountain.x,y:AREAS.mountain.y});
-    this.farmObjects.push({type:'volcano_sign',x:AREAS.volcano.x,y:AREAS.volcano.y});
+  // ── SPAWN HELPERS ─────────────────────────────────────────
+  spawnChicken(gender, x, z) {
+    x = x !== undefined ? x : rnd(-20,20);
+    z = z !== undefined ? z : rnd(-20,20);
+    const c = {
+      pos: new THREE.Vector3(x, 0, z),
+      gender,
+      transform: null,
+      buffLevel: 0,
+      specialUpgrades: {},   // rock/sand/lava upgrades
+      following: false,
+      hp: 40, maxHp: 40,
+      hpRegen: 0,            // fractional regen accumulator
+      dead: false,
+      attackCooldown: 0,
+      wanderTimer: rndI(80,200),
+      wanderTarget: new THREE.Vector3(x+rnd(-8,8),0,z+rnd(-8,8)),
+      label: gender==='hen'?'Hen':'Rooster',
+      id: Math.random().toString(36).slice(2,8),
+      mesh: null,
+    };
+    c.mesh = makeChickenMesh(c.gender, null, 0);
+    c.mesh.position.copy(c.pos);
+    this.activeScene.add(c.mesh);
+    this.chickens.push(c);
+    return c;
   },
 
-  spawnInitialPickups(){
-    // Scatter rune pickups around the farm
-    const zones=[
-      {type:'air',  cx:-200, cy:-150, count:6},
-      {type:'earth',cx:200,  cy:150,  count:6},
-      {type:'water',cx:150,  cy:-200, count:6},
-      {type:'fire', cx:-150, cy:200,  count:6},
+  spawnEnemy(type, x, z, scene) {
+    scene = scene || this.activeScene;
+    const def = ENEMY_DEFS[type] || ZONE_ENEMY[type];
+    if (!def) return;
+    const scale = 1 + (this.day-1)*0.04;
+    const e = {
+      type,
+      pos: new THREE.Vector3(x||rnd(-60,60), 0, z||rnd(-60,60)),
+      def,
+      label: def.label,
+      hp: Math.round(def.hp*scale),
+      maxHp: Math.round(def.hp*scale),
+      dmg: Math.round(def.dmg*scale),
+      speed: def.spd,
+      size: def.sz,
+      atkRange: def.atkR,
+      aggroRange: def.aggR,
+      ranged: def.ranged,
+      runeType: def.runeT,
+      attackCooldown: 0,
+      stunTime: 0,
+      dead: false,
+      mesh: null,
+    };
+    e.mesh = makeEnemyMesh(type);
+    e.mesh.position.copy(e.pos);
+    scene.add(e.mesh);
+    this.enemies.push(e);
+    return e;
+  },
+
+  spawnRunePickup(type, x, z) {
+    x = x !== undefined ? x : rnd(-40,40);
+    z = z !== undefined ? z : rnd(-40,40);
+    const rp = {
+      pos: new THREE.Vector3(x, 0.5, z),
+      type, dead: false,
+      mesh: makeRuneMesh(type),
+      phase: rnd(0, Math.PI*2),
+    };
+    rp.mesh.position.copy(rp.pos);
+    this.activeScene.add(rp.mesh);
+    this.runePickups.push(rp);
+    return rp;
+  },
+
+  spawnInitialRunes() {
+    const zones = [
+      {type:'air',  cx:-15, cz:-12, n:6},
+      {type:'earth',cx:15,  cz:12,  n:6},
+      {type:'water',cx:12,  cz:-15, n:6},
+      {type:'fire', cx:-12, cz:15,  n:6},
     ];
-    for(const z of zones){
-      for(let i=0;i<z.count;i++){
-        this.runePickups.push(new RunePickup(z.cx+rnd(-120,120),z.cy+rnd(-120,120),z.type));
-      }
+    for (const z of zones) {
+      for (let i=0;i<z.n;i++) this.spawnRunePickup(z.type, z.cx+rnd(-10,10), z.cz+rnd(-10,10));
     }
   },
 
-  spawnEnemiesForDay(){
-    const day=this.day;
-    const scale=1+day*0.04;
-    const count=Math.floor(3+day*0.4);
-    const types=['cyborg_cow','psychic_sheep','heavy_horse','monster_mutt'];
-    for(let i=0;i<count;i++){
-      const eType=types[i%types.length];
-      const angle=rnd(0,TWO_PI), r=rnd(400,700);
-      const e=new Enemy(Math.cos(angle)*r,Math.sin(angle)*r,eType,null);
-      e.maxHp=Math.round(e.maxHp*scale);
-      e.hp=e.maxHp;
-      e.dmg=Math.round(e.dmg*scale);
-      this.enemies.push(e);
-    }
-    // Spawn area enemies if unlocked
-    for(const [areaKey,unlocked] of Object.entries(this.unlockedAreas)){
-      if(!unlocked||areaKey==='farm') continue;
-      const area=AREAS[areaKey];
-      for(let i=0;i<3;i++){
-        const angle=rnd(0,TWO_PI),r=rnd(100,AREA_RADIUS*0.8);
-        const e=new Enemy(area.x+Math.cos(angle)*r,area.y+Math.sin(angle)*r,null,areaKey);
-        e.maxHp=Math.round(e.maxHp*scale);
-        e.hp=e.maxHp;
-        this.enemies.push(e);
-        // Spawn rune pickup in area
-        this.runePickups.push(new RunePickup(area.x+rnd(-200,200),area.y+rnd(-200,200),AREA_RUNE[areaKey]));
-      }
+  spawnEnemiesForDay() {
+    const day = this.day;
+    const count = Math.floor(3 + day*0.35);
+    const types = ['cyborg_cow','psychic_sheep','heavy_horse','monster_mutt'];
+    // Only spawn farm enemies when on farm
+    for (let i=0;i<count;i++) {
+      const type = types[i%types.length];
+      const a = rnd(0,Math.PI*2), r = rnd(30,65);
+      this.spawnEnemy(type, Math.cos(a)*r, Math.sin(a)*r, this.scenes.farm);
     }
   },
 
-  sleep(){
-    if(!this.running||this.isBossFight) return;
-    this.day++;
-    this.msg(`Day ${this.day} begins. The chickens lay their eggs!`,'#ffd700');
+  spawnZoneEnemies(zoneName) {
+    const scene = this.scenes[zoneName];
+    const zType = zoneName;
+    const bounds = scene.userData.bounds || 35;
+    const count = 4 + Math.floor(this.day*0.25);
+    for (let i=0;i<count;i++) {
+      const a=rnd(0,Math.PI*2), r=rnd(8,bounds*0.7);
+      const e = this.spawnEnemy(zType, Math.cos(a)*r, Math.sin(a)*r, scene);
+    }
+    // Rune pickups in zone
+    const runeType = ZONE_RUNE[zoneName];
+    for (let i=0;i<6;i++) {
+      const a=rnd(0,Math.PI*2), r=rnd(5,bounds*0.6);
+      const rp = {
+        pos: new THREE.Vector3(Math.cos(a)*r, 0.5, Math.sin(a)*r),
+        type:runeType, dead:false,
+        mesh: makeRuneMesh(runeType),
+        phase: rnd(0, Math.PI*2),
+      };
+      rp.mesh.position.copy(rp.pos);
+      scene.add(rp.mesh);
+      this.runePickups.push(rp);
+    }
+  },
 
-    // Hens lay eggs
-    for(const c of this.chickens){
-      if(c.dead||c.gender!=='hen') continue;
-      this.eggs.push(new Egg(c.x+rnd(-20,20),c.y+rnd(-20,20)));
+  // ── ZONE TRANSITION ───────────────────────────────────────
+  enterZone(zoneName) {
+    if (!this.unlockedZones[zoneName] && zoneName !== 'farm') {
+      this.msg(`🔒 Zone locked! Feed ${Object.keys(UNLOCK_REQ).find(k=>UNLOCK_REQ[k]===zoneName)} runes to 10 chickens first.`, '#ff8888');
+      return;
+    }
+    const oldScene = this.activeScene;
+    const newScene = this.scenes[zoneName];
+
+    // Move player mesh
+    oldScene.remove(this.player.mesh);
+    newScene.add(this.player.mesh);
+
+    // Move following chickens
+    for (const c of this.chickens) {
+      if (c.dead) continue;
+      oldScene.remove(c.mesh);
+      if (c.following) {
+        newScene.add(c.mesh);
+      } else {
+        // Non-following chickens stay on farm
+        if (zoneName !== 'farm') {
+          this.scenes.farm.add(c.mesh);
+        }
+      }
     }
 
-    // Clean dead enemies, add new ones
-    this.enemies=this.enemies.filter(e=>!e.dead);
-    this.spawnEnemiesForDay();
+    // Remove non-farm enemies from arrays when leaving zone
+    this.enemies = this.enemies.filter(e => {
+      if (e.dead) return false;
+      // Keep enemies in their scene
+      return true;
+    });
 
-    // Refill some rune pickups
-    const types=RUNE_TYPES;
-    for(let i=0;i<4;i++){
-      const t=types[rndI(0,3)];
-      this.runePickups.push(new RunePickup(rnd(-400,400),rnd(-400,400),t));
+    // Clear zone-specific pickups/enemies from other zones
+    this.runePickups = this.runePickups.filter(rp => !rp.dead);
+    this.projectiles.forEach(p => { oldScene.remove(p.mesh); p.dead=true; });
+    this.projectiles = [];
+
+    this.activeScene = newScene;
+    this.currentZone = zoneName;
+
+    // Set player spawn position in new zone
+    if (zoneName === 'farm') {
+      // Return near the portal they came from
+      const portals = newScene.userData.portals || [];
+      // Player returns near opposite side
+      this.player.pos.set(rnd(-5,5), 0, rnd(-5,5));
+    } else {
+      this.player.pos.set(0, 0, -30);
+      // Spawn zone enemies if first visit
+      const hasEnemies = this.enemies.some(e => e.mesh.parent === newScene);
+      if (!hasEnemies) this.spawnZoneEnemies(zoneName);
     }
+    this.player.mesh.position.copy(this.player.pos);
 
-    if(this.day>=100 && !this.isBossFight){
-      this.triggerBoss();
-    }
-
+    const zoneLabel = ZONES[zoneName]?.label || zoneName;
+    this.msg(`Entered: ${zoneLabel}`, '#aaffaa');
     this.updateHUD();
   },
 
-  triggerBoss(){
-    this.isBossFight=true;
+  // ── SLEEP (next day) ──────────────────────────────────────
+  sleep() {
+    if (!this.running || this.isBossFight) return;
+    this.day++;
+    this.msg(`Day ${this.day} begins. Hens lay eggs!`, '#ffd700');
+
+    for (const c of this.chickens) {
+      if (c.dead || c.gender !== 'hen') continue;
+      const egg = {
+        pos: new THREE.Vector3(c.pos.x+rnd(-1.5,1.5), 0.18, c.pos.z+rnd(-1.5,1.5)),
+        dead: false,
+        mesh: makeEggMesh(),
+      };
+      egg.mesh.position.copy(egg.pos);
+      this.scenes.farm.add(egg.mesh);
+      this.eggs.push(egg);
+    }
+
+    this.enemies = this.enemies.filter(e => !e.dead);
+    // Add new farm enemies
+    if (this.currentZone === 'farm') this.spawnEnemiesForDay();
+    else {
+      // Still add them to farm for when player returns
+      const day = this.day, count = Math.floor(3+day*0.35);
+      const types = ['cyborg_cow','psychic_sheep','heavy_horse','monster_mutt'];
+      for (let i=0;i<count;i++) {
+        const type=types[i%types.length], a=rnd(0,Math.PI*2), r=rnd(30,65);
+        this.spawnEnemy(type, Math.cos(a)*r, Math.sin(a)*r, this.scenes.farm);
+      }
+    }
+
+    // Refresh farm rune pickups
+    for (let i=0;i<4;i++) {
+      const t = RUNE_TYPES[rndI(0,3)];
+      this.spawnRunePickup(t, rnd(-30,30), rnd(-30,30));
+    }
+
+    if (this.day >= 100 && !this.isBossFight) this.triggerBoss();
+    this.updateHUD();
+  },
+
+  // ── BOSS ──────────────────────────────────────────────────
+  triggerBoss() {
+    this.isBossFight = true;
     document.getElementById('boss-screen').classList.remove('hidden');
   },
 
-  startBoss(){
+  startBoss() {
     document.getElementById('boss-screen').classList.add('hidden');
-    this.boss=new Boss();
-    this.enemies=[];
-    this.msg('DAY 100 — FARMER JIM APPROACHES!','#ff0000');
+    if (this.currentZone !== 'farm') this.enterZone('farm');
+    // Red sky
+    this.activeScene.background = new THREE.Color(0x3a0000);
+    this.activeScene.fog = new THREE.Fog(0x3a0000, 40, 160);
+    // Spawn boss
+    const boss = {
+      isBoss: true,
+      type: 'boss',
+      pos: new THREE.Vector3(0, 0, -25),
+      mesh: makeBossMesh(),
+      hp: 2000, maxHp: 2000,
+      dmg: 35, speed: 0.04,
+      size: 3.5,
+      atkRange: 20,
+      aggroRange: 9999,
+      ranged: true,
+      attackCooldown: 0,
+      specialCooldown: 200,
+      phase: 1,
+      stunTime: 0,
+      dead: false,
+    };
+    boss.mesh.position.copy(boss.pos);
+    this.activeScene.add(boss.mesh);
+    this.enemies.push(boss);
+    this.enemies = this.enemies.filter(e => e.isBoss || e.dead);
+    this.msg('DAY 100 — FARMER JIM APPROACHES!', '#ff0000');
   },
 
-  playerAttack(){
-    if(!this.running) return;
-    if(this.player.attackCooldown>0) return;
-    this.player.attackCooldown=20;
+  // ── PLAYER ATTACK ─────────────────────────────────────────
+  playerAttack() {
+    if (!this.running || this.player.attackCooldown > 0) return;
+    this.player.attackCooldown = 18;
 
-    // Direction toward mouse
-    const sx=this.player.x-this.camera.x+canvas.width/2;
-    const sy=this.player.y-this.camera.y+canvas.height/2;
-    const [nx,ny]=norm(mouseX-sx,mouseY-sy);
-    this.player.angle=Math.atan2(mouseY-sy,mouseX-sx);
-
-    // Melee arc
-    for(const e of this.enemies){
-      const d=dist(this.player,e);
-      if(d<this.player.atkRange+e.size){
-        const killed=e.takeDamage(this.player.dmg);
-        if(killed) this.onEnemyKilled(e);
+    // Find nearest enemy in arc
+    let nearest = null, nearestD = Infinity;
+    for (const e of this.enemies) {
+      if (e.dead || e.mesh.parent !== this.activeScene) continue;
+      const d = dist2D(this.player, e);
+      if (d < this.player.atkRange + e.size + 1.5 && d < nearestD) {
+        nearestD = d; nearest = e;
       }
     }
-    if(this.boss&&!this.boss.dead){
-      const d=dist(this.player,this.boss);
-      if(d<this.player.atkRange+this.boss.size){
-        this.boss.takeDamage(this.player.dmg);
-        if(this.boss.hp<=0) this.triggerVictory();
-      }
+    if (nearest) {
+      const killed = this.damageEnemy(nearest, this.player.dmg);
+      this.playerTarget = nearest.dead ? null : nearest;
     }
 
-    // Ranged slash projectile
-    this.projectiles.push(new Projectile(this.player.x,this.player.y,nx,ny,7,this.player.dmg,'#88ccff','player'));
+    // Shoot projectile in facing direction
+    const fwd = new THREE.Vector3(Math.sin(this.player.facingYaw), 0, Math.cos(this.player.facingYaw));
+    this.spawnProjectile(this.player.pos.clone().add(new THREE.Vector3(0,1.2,0)), fwd, 0.35, this.player.dmg, 0x88ccff, 'player');
   },
 
-  onEnemyKilled(e){
-    // Drop rune
-    const runeType=e.runeType||'air';
-    this.runePickups.push(new RunePickup(e.x,e.y,runeType));
-    this.msg(`${e.label} defeated! Dropped a ${runeType} rune.`,'#88ff88');
+  damageEnemy(e, dmg) {
+    if (e.dead) return false;
+    e.hp -= dmg;
+    e.stunTime = 8;
+    if (e.hp <= 0) {
+      e.dead = true;
+      e.mesh.parent && e.mesh.parent.remove(e.mesh);
+      this.onEnemyKilled(e);
+      if (this.playerTarget === e) this.playerTarget = null;
+      return true;
+    }
+    return false;
   },
 
-  interact(){
-    if(!this.running) return;
-    const p=this.player;
-    // Check egg click range
-    for(const egg of this.eggs){
-      if(egg.dead) continue;
-      if(dist(p,egg)<40){
-        egg.dead=true;
-        const gender=Math.random()<0.5?'hen':'rooster';
-        const c=new Chicken(egg.x,egg.y,gender);
-        this.chickens.push(c);
-        this.msg(`A ${gender} hatched!`,'#ffe080');
-        return;
-      }
-    }
-    // Check rune pickup
-    for(const rp of this.runePickups){
-      if(rp.dead) continue;
-      if(dist(p,rp)<40){
-        rp.dead=true;
-        this.runes[rp.type]++;
-        this.msg(`Picked up ${rp.type} rune! (${this.runes[rp.type]} total)`,'#ffd700');
+  onEnemyKilled(e) {
+    const runeType = e.runeType || 'air';
+    const rp = {
+      pos: new THREE.Vector3(e.pos.x, 0.5, e.pos.z),
+      type: runeType, dead: false,
+      mesh: makeRuneMesh(runeType),
+      phase: rnd(0,Math.PI*2),
+    };
+    rp.mesh.position.copy(rp.pos);
+    this.activeScene.add(rp.mesh);
+    this.runePickups.push(rp);
+    if (e.isBoss) this.triggerVictory();
+    else this.msg(`${e.label} defeated! Dropped a ${runeType} rune.`, '#88ff88');
+  },
+
+  spawnProjectile(origin, dir, spd, dmg, color, owner) {
+    const pr = {
+      pos: origin.clone(),
+      dir: dir.clone().normalize(),
+      speed: spd,
+      dmg, color, owner,
+      life: 70, dead: false,
+      mesh: makeProjectile(color),
+    };
+    pr.mesh.position.copy(pr.pos);
+    this.activeScene.add(pr.mesh);
+    this.projectiles.push(pr);
+  },
+
+  // ── INTERACT ──────────────────────────────────────────────
+  interact() {
+    if (!this.running) return;
+    const p = this.player;
+
+    // Egg hatch
+    for (const egg of this.eggs) {
+      if (egg.dead) continue;
+      if (dist2D(p, egg) < 2.0) {
+        egg.dead = true;
+        egg.mesh.parent && egg.mesh.parent.remove(egg.mesh);
+        const gender = Math.random() < 0.5 ? 'hen' : 'rooster';
+        const nc = this.spawnChicken(gender, egg.pos.x, egg.pos.z);
+        this.msg(`A ${gender} hatched from the egg!`, '#ffe080');
         this.updateHUD();
         return;
       }
     }
-    // Check nearby chicken for feeding
-    for(const c of this.chickens){
-      if(c.dead) continue;
-      if(dist(p,c)<60){
+    // Rune pickup
+    for (const rp of this.runePickups) {
+      if (rp.dead || rp.mesh.parent !== this.activeScene) continue;
+      if (dist2D(p, rp) < 2.0) {
+        rp.dead = true;
+        rp.mesh.parent && rp.mesh.parent.remove(rp.mesh);
+        this.runes[rp.type]++;
+        this.msg(`Picked up ${rp.type} rune! (${this.runes[rp.type]} total)`, '#ffd700');
+        this.updateHUD();
+        return;
+      }
+    }
+    // Chicken feed
+    for (const c of this.chickens) {
+      if (c.dead || c.mesh.parent !== this.activeScene) continue;
+      if (dist2D(p, c) < 2.5) {
         this.openFeedPanel(c);
         return;
       }
     }
   },
 
-  openFeedPanel(chicken){
-    const panel=document.getElementById('feed-panel');
-    const title=document.getElementById('feed-title');
-    const desc=document.getElementById('feed-desc');
-    const opts=document.getElementById('feed-options');
-    title.textContent=`Feed a Rune to ${chicken.label}`;
-    desc.textContent=chicken.transform?`Already transformed into a ${CHICKEN_TRANSFORM[chicken.transform].label}. Feed Buff Runes to strengthen!`:'Choose a rune to transform this chicken:';
-    opts.innerHTML='';
+  // ── FEED PANEL ────────────────────────────────────────────
+  openFeedPanel(chicken) {
+    const panel   = document.getElementById('feed-panel');
+    const title   = document.getElementById('feed-title');
+    const desc    = document.getElementById('feed-desc');
+    const opts    = document.getElementById('feed-options');
+    title.textContent = `Feed a Rune to ${chicken.label}`;
+    desc.textContent  = chicken.transform
+      ? `Transformed: ${CHK_XFORM[chicken.transform].label}. Feed upgrade runes to strengthen!`
+      : 'Choose a rune to transform or upgrade this chicken:';
+    opts.innerHTML = '';
 
-    const addBtn=(label,type,count,action)=>{
-      if(count<=0) return;
-      const btn=document.createElement('button');
-      btn.textContent=`${label} (${count} available)`;
-      btn.onclick=()=>{ action(); this.closeFeedPanel(); this.updateHUD(); };
+    const addBtn = (label, action) => {
+      const btn = document.createElement('button');
+      btn.textContent = label;
+      btn.onclick = () => { action(); this.closeFeedPanel(); this.updateHUD(); };
       opts.appendChild(btn);
     };
 
-    if(!chicken.transform){
-      RUNE_TYPES.forEach(r=>{
-        addBtn(`${r.charAt(0).toUpperCase()+r.slice(1)} Rune → ${CHICKEN_TRANSFORM[r].label}`,r,this.runes[r],()=>{
-          if(chicken.feedRune(r)){
-            this.runes[r]--;
-            this.areaRuneFed[r]++;
-            this.msg(`${chicken.label} transformed into a ${CHICKEN_TRANSFORM[r].label}!`,'#ffd700');
-            this.checkAreaUnlocks();
-          }
+    // Basic transform runes (only if not yet transformed)
+    if (!chicken.transform) {
+      for (const r of RUNE_TYPES) {
+        if (this.runes[r] <= 0) continue;
+        const xf = CHK_XFORM[r];
+        addBtn(`${RUNE_EMOJI[r]} ${r.charAt(0).toUpperCase()+r.slice(1)} Rune → ${xf.label} (have ${this.runes[r]})`, () => {
+          this.runes[r]--;
+          this.feedRuneToChicken(chicken, r);
         });
-      });
-    } else {
-      // Buff runes
-      addBtn(`💪 Buff Rune → BUFF UP!`,'buff',this.runes.buff,()=>{
+      }
+    }
+
+    // Special / upgrade runes — always available regardless of transform
+    // Buff Rune: size/HP/dmg/speed boost
+    if (this.runes.buff > 0) {
+      addBtn(`${RUNE_EMOJI.buff} Buff Rune → BUFF UP! HP+30 DMG+30% SPD+10% SIZE+20% (have ${this.runes.buff})`, () => {
         this.runes.buff--;
-        chicken.applyBuff();
-        this.msg(`${chicken.label} got BUFFER! (Level ${chicken.buffLevel})`,'#FFD700');
+        chicken.buffLevel++;
+        chicken.maxHp += 30;
+        chicken.hp = Math.min(chicken.hp + 30, chicken.maxHp);
+        this.rebuildChickenMesh(chicken);
+        this.msg(`${chicken.label} gets BUFFER! (Buff Lv.${chicken.buffLevel}) 💪`, '#FFD700');
+      });
+    }
+    // Rock Rune: damage reduction + rocky armor
+    if (this.runes.rock > 0) {
+      addBtn(`${RUNE_EMOJI.rock} Rock Rune → Rocky Armor! -35% incoming dmg (have ${this.runes.rock})`, () => {
+        this.runes.rock--;
+        chicken.specialUpgrades.rock = (chicken.specialUpgrades.rock||0) + 1;
+        chicken.maxHp += 20;
+        chicken.hp = Math.min(chicken.hp + 20, chicken.maxHp);
+        this.rebuildChickenMesh(chicken);
+        this.msg(`${chicken.label} grows rocky armor! ⛰️`, '#aaaaaa');
+      });
+    }
+    // Sand Rune: speed boost + sand projectile
+    if (this.runes.sand > 0) {
+      addBtn(`${RUNE_EMOJI.sand} Sand Rune → Speed Boost! +35% speed, sand blasts (have ${this.runes.sand})`, () => {
+        this.runes.sand--;
+        chicken.specialUpgrades.sand = (chicken.specialUpgrades.sand||0) + 1;
+        this.rebuildChickenMesh(chicken);
+        this.msg(`${chicken.label} is lightning fast! 🏖️`, '#F4A460');
+      });
+    }
+    // Lava Rune: fire damage on hit
+    if (this.runes.lava > 0) {
+      addBtn(`${RUNE_EMOJI.lava} Lava Rune → Lava Coating! +50% damage (have ${this.runes.lava})`, () => {
+        this.runes.lava--;
+        chicken.specialUpgrades.lava = (chicken.specialUpgrades.lava||0) + 1;
+        this.rebuildChickenMesh(chicken);
+        this.msg(`${chicken.label} coated in lava! 🌋`, '#FF6347');
       });
     }
 
-    if(opts.children.length===0){
-      const p=document.createElement('p');
-      p.textContent='No applicable runes to feed.';
-      p.style.color='#aaa';
+    if (opts.children.length === 0) {
+      const p = document.createElement('p');
+      p.textContent = 'No applicable runes to feed.';
+      p.style.color = '#aaa';
       opts.appendChild(p);
     }
     panel.classList.remove('hidden');
+    this.running = false; // pause game while panel open
   },
 
-  closeFeedPanel(){
+  closeFeedPanel() {
     document.getElementById('feed-panel').classList.add('hidden');
+    this.running = true;
   },
 
-  checkAreaUnlocks(){
-    for(const [rType,count] of Object.entries(this.areaRuneFed)){
-      const areaKey=AREA_UNLOCK[rType];
-      if(count>=10&&!this.unlockedAreas[areaKey]){
-        this.unlockedAreas[areaKey]=true;
-        const areaName=AREAS[areaKey].label;
-        this.msg(`🔓 NEW AREA UNLOCKED: ${areaName}!`,'#00ff88');
-        // Spawn some rune pickups there
-        const area=AREAS[areaKey];
-        for(let i=0;i<8;i++){
-          this.runePickups.push(new RunePickup(area.x+rnd(-200,200),area.y+rnd(-200,200),AREA_RUNE[areaKey]));
-        }
+  feedRuneToChicken(chicken, runeType) {
+    chicken.transform = runeType;
+    chicken.following = true;
+    chicken.maxHp = 80;
+    chicken.hp = 80;
+    chicken.label = CHK_XFORM[runeType].label;
+    this.runesFedByType[runeType]++;
+    this.rebuildChickenMesh(chicken);
+    this.msg(`${chicken.label} transformed! Now following you. 🐔✨`, '#ffd700');
+    this.checkZoneUnlocks();
+  },
+
+  rebuildChickenMesh(chicken) {
+    if (chicken.mesh.parent) {
+      chicken.mesh.parent.remove(chicken.mesh);
+    }
+    chicken.mesh = makeChickenMesh(chicken.gender, chicken.transform, chicken.buffLevel);
+    // Apply rock armor visuals
+    if (chicken.specialUpgrades.rock) {
+      for (let i=0;i<6;i++) {
+        const a=i*Math.PI/3;
+        addM(chicken.mesh, sphG(0.1,5), lmat(0x888888), Math.cos(a)*0.45,0.52,Math.sin(a)*0.45);
+      }
+    }
+    // Apply lava visuals
+    if (chicken.specialUpgrades.lava) {
+      for (let i=0;i<3;i++) {
+        const a=i*Math.PI*0.66;
+        const lv = M(sphG(0.08,5), new THREE.MeshBasicMaterial({color:0xff4400,transparent:true,opacity:0.85}));
+        lv.position.set(Math.cos(a)*0.4, 0.3, Math.sin(a)*0.4);
+        chicken.mesh.add(lv);
+      }
+    }
+    chicken.mesh.position.copy(chicken.pos);
+    (chicken.following ? this.activeScene : this.scenes.farm).add(chicken.mesh);
+  },
+
+  checkZoneUnlocks() {
+    for (const [runeType, count] of Object.entries(this.runesFedByType)) {
+      const zoneName = UNLOCK_REQ[runeType];
+      if (count >= 10 && !this.unlockedZones[zoneName]) {
+        this.unlockedZones[zoneName] = true;
+        this.msg(`🔓 NEW ZONE UNLOCKED: ${ZONES[zoneName].label}! Head to the portal!`, '#00ff88');
       }
     }
   },
 
-  toggleChickenPanel(){
-    const panel=document.getElementById('chicken-panel');
-    if(panel.classList.contains('hidden')){
-      this.renderChickenPanel();
-      panel.classList.remove('hidden');
-    } else {
-      panel.classList.add('hidden');
-    }
+  // ── CHICKEN PANEL ─────────────────────────────────────────
+  toggleChickenPanel() {
+    const panel = document.getElementById('chicken-panel');
+    if (panel.classList.contains('hidden')) { this.renderChickenList(); panel.classList.remove('hidden'); }
+    else panel.classList.add('hidden');
   },
+  closeChickenPanel() { document.getElementById('chicken-panel').classList.add('hidden'); },
 
-  closeChickenPanel(){
-    document.getElementById('chicken-panel').classList.add('hidden');
-  },
-
-  renderChickenPanel(){
-    const list=document.getElementById('chicken-list');
-    list.innerHTML='';
-    const alive=this.chickens.filter(c=>!c.dead);
-    alive.forEach(c=>{
-      const div=document.createElement('div');
-      div.className='chk-entry'+(c.following?' following':'')+(c.transform?' '+c.transform+'-t':'');
-      div.innerHTML=`<b>${c.label}</b> ${c.transform?'★':''} HP:${Math.ceil(c.hp)}/${c.maxHp} ${c.buffLevel>0?'💪x'+c.buffLevel:''}`;
-      const btn=document.createElement('button');
-      btn.style='float:right;background:rgba(255,255,255,0.1);border:none;color:#fff;padding:2px 6px;border-radius:4px;cursor:pointer;font-size:11px;';
-      btn.textContent=c.following?'Dismiss':'Follow';
-      btn.onclick=()=>{
-        c.following=!c.following;
-        this.renderChickenPanel();
-      };
+  renderChickenList() {
+    const list = document.getElementById('chicken-list');
+    list.innerHTML = '';
+    const alive = this.chickens.filter(c => !c.dead);
+    alive.forEach(c => {
+      const div = document.createElement('div');
+      div.className = 'chk-entry' + (c.following?' following':'') + (c.transform?' '+c.transform+'-t':'');
+      let upgStr = '';
+      if (c.buffLevel > 0) upgStr += ` 💪x${c.buffLevel}`;
+      if (c.specialUpgrades.rock) upgStr += ` ⛰️x${c.specialUpgrades.rock}`;
+      if (c.specialUpgrades.sand) upgStr += ` 🏖️x${c.specialUpgrades.sand}`;
+      if (c.specialUpgrades.lava) upgStr += ` 🌋x${c.specialUpgrades.lava}`;
+      div.innerHTML = `<b>${c.label}</b> HP:${Math.ceil(c.hp)}/${c.maxHp}${upgStr}`;
+      const btn = document.createElement('button');
+      btn.style = 'float:right;background:rgba(255,255,255,0.1);border:none;color:#fff;padding:2px 6px;border-radius:4px;cursor:pointer;font-size:11px;';
+      btn.textContent = c.following ? 'Dismiss' : 'Follow';
+      btn.onclick = () => { c.following = !c.following; this.renderChickenList(); };
       div.appendChild(btn);
       list.appendChild(div);
     });
-    if(alive.length===0) list.innerHTML='<p style="color:#aaa">All chickens have fallen...</p>';
+    if (!alive.length) list.innerHTML = '<p style="color:#aaa">All chickens have fallen...</p>';
   },
 
-  toggleMinimap(){
-    const mp=document.getElementById('minimap-panel');
-    mp.classList.toggle('hidden');
-    if(!mp.classList.contains('hidden')) this.drawMinimap();
-  },
-
-  drawMinimap(){
-    const mc=document.getElementById('minimapCanvas');
-    const mctx=mc.getContext('2d');
-    const scale=mc.width/FARM_SIZE;
-    const cx=mc.width/2, cy=mc.height/2;
-    mctx.fillStyle='#1a3320';
-    mctx.fillRect(0,0,mc.width,mc.height);
-
-    // Areas
-    for(const [key,area] of Object.entries(AREAS)){
-      if(!this.unlockedAreas[key]&&key!=='farm') continue;
-      const ax=cx+area.x*scale, ay=cy+area.y*scale;
-      mctx.beginPath();
-      mctx.arc(ax,ay,AREA_RADIUS*scale,0,TWO_PI);
-      mctx.fillStyle=area.color+'88';
-      mctx.fill();
-      mctx.fillStyle='#fff';
-      mctx.font='8px sans-serif';
-      mctx.textAlign='center';
-      mctx.fillText(area.label,ax,ay);
-    }
-
-    // Player
-    const px=cx+this.player.x*scale, py=cy+this.player.y*scale;
-    mctx.beginPath();
-    mctx.arc(px,py,3,0,TWO_PI);
-    mctx.fillStyle='#4488ff';
-    mctx.fill();
-  },
-
-  save(){
-    const data={
-      day:this.day,
-      runes:this.runes,
-      playerHp:this.player.hp,
-      unlockedAreas:this.unlockedAreas,
-      areaRuneFed:this.areaRuneFed,
-      chickens:this.chickens.map(c=>({
-        x:c.x,y:c.y,gender:c.gender,transform:c.transform,
-        buffLevel:c.buffLevel,following:c.following,hp:c.hp
+  // ── SAVE / LOAD ───────────────────────────────────────────
+  save() {
+    const data = {
+      day: this.day,
+      runes: this.runes,
+      playerHp: this.player.hp,
+      unlockedZones: this.unlockedZones,
+      runesFedByType: this.runesFedByType,
+      chickens: this.chickens.map(c => ({
+        x:c.pos.x, z:c.pos.z, gender:c.gender,
+        transform:c.transform, buffLevel:c.buffLevel,
+        specialUpgrades:c.specialUpgrades,
+        following:c.following, hp:c.hp, maxHp:c.maxHp,
       })),
     };
-    localStorage.setItem('buffchickens_save',JSON.stringify(data));
-    this.msg('Game saved! 💾','#88ff88');
+    localStorage.setItem('buffchickens_save', JSON.stringify(data));
+    this.msg('Game saved! 💾', '#88ff88');
   },
 
-  load(){
-    const raw=localStorage.getItem('buffchickens_save');
-    if(!raw){ this.msg('No save found.','#ff8888'); return; }
-    const data=JSON.parse(raw);
-    if(!this.running){
-      this.start();
+  load() {
+    const raw = localStorage.getItem('buffchickens_save');
+    if (!raw) { this.msg('No save found.', '#ff8888'); return; }
+    const data = JSON.parse(raw);
+    if (!this.running) { this.start(); }
+    this.day   = data.day;
+    this.runes = data.runes;
+    this.player.hp = data.playerHp;
+    this.unlockedZones = data.unlockedZones;
+    this.runesFedByType = data.runesFedByType;
+
+    // Remove old chickens
+    for (const c of this.chickens) {
+      c.mesh.parent && c.mesh.parent.remove(c.mesh);
     }
-    this.day=data.day;
-    this.runes=data.runes;
-    this.player.hp=data.playerHp;
-    this.unlockedAreas=data.unlockedAreas;
-    this.areaRuneFed=data.areaRuneFed;
-    this.chickens=data.chickens.map(cd=>{
-      const c=new Chicken(cd.x,cd.y,cd.gender);
-      c.transform=cd.transform;
-      c.buffLevel=cd.buffLevel;
-      c.following=cd.following;
-      c.hp=cd.hp;
-      if(cd.transform) c.label=CHICKEN_TRANSFORM[cd.transform].label;
-      return c;
-    });
+    this.chickens = [];
+
+    for (const cd of data.chickens) {
+      const c = {
+        pos: new THREE.Vector3(cd.x, 0, cd.z),
+        gender: cd.gender, transform: cd.transform,
+        buffLevel: cd.buffLevel||0,
+        specialUpgrades: cd.specialUpgrades||{},
+        following: cd.following, hp: cd.hp, maxHp: cd.maxHp||40,
+        hpRegen: 0, dead: false,
+        attackCooldown: 0, stunTime: 0,
+        wanderTimer: rndI(80,200),
+        wanderTarget: new THREE.Vector3(cd.x+rnd(-8,8),0,cd.z+rnd(-8,8)),
+        label: cd.transform ? (CHK_XFORM[cd.transform]?.label||cd.transform) : (cd.gender==='hen'?'Hen':'Rooster'),
+        id: Math.random().toString(36).slice(2,8),
+        mesh: null,
+      };
+      c.mesh = makeChickenMesh(c.gender, c.transform, c.buffLevel);
+      c.mesh.position.copy(c.pos);
+      (c.following ? this.activeScene : this.scenes.farm).add(c.mesh);
+      this.chickens.push(c);
+    }
+
     this.updateHUD();
-    this.msg('Game loaded! 💾','#88ff88');
+    this.msg('Game loaded! 💾', '#88ff88');
   },
 
-  msg(text,color='#fff'){
-    const el=document.createElement('div');
-    el.className='msg';
-    el.style.color=color;
-    el.textContent=text;
-    this.msgEl.appendChild(el);
-    setTimeout(()=>el.remove(),3200);
-  },
-
-  updateHUD(){
-    const alive=this.chickens.filter(c=>!c.dead);
-    const eggs=this.eggs.filter(e=>!e.dead);
-    document.getElementById('day-label').textContent=`Day ${this.day} / 100`;
-    document.getElementById('day-bar-fill').style.width=`${this.day}%`;
-    document.getElementById('hp-bar-fill').style.width=`${(this.player.hp/this.player.maxHp)*100}%`;
-    document.getElementById('hp-text').textContent=`${Math.ceil(this.player.hp)}/${this.player.maxHp}`;
-    for(const r of ALL_RUNES){
-      const el=document.getElementById(`r-${r}`);
-      if(el) el.textContent=this.runes[r]||0;
-    }
-    document.getElementById('chk-count').textContent=alive.length;
-    document.getElementById('egg-count').textContent=eggs.length;
-    document.getElementById('area-name').textContent=AREAS[this.currentArea]?.label||'The Farm';
-  },
-
-  detectArea(){
-    let closest='farm', closestD=Infinity;
-    for(const [key,area] of Object.entries(AREAS)){
-      if(!this.unlockedAreas[key]) continue;
-      const d=dist(this.player,{x:area.x,y:area.y});
-      if(d<AREA_RADIUS && d<closestD){ closest=key; closestD=d; }
-    }
-    if(closest!==this.currentArea){
-      this.currentArea=closest;
-      this.msg(`Entered: ${AREAS[closest].label}`,'#aaffaa');
-      this.updateHUD();
-    }
-  },
-
-  triggerVictory(){
-    this.running=false;
+  // ── VICTORY ───────────────────────────────────────────────
+  triggerVictory() {
+    this.running = false;
     document.getElementById('victory-screen').classList.remove('hidden');
-    this.victoryActive=true;
-    this.victoryFrame=0;
-    this.animateVictory();
+    this.victoryActive = true;
+    this.animateVictory(0);
   },
 
-  animateVictory(){
-    const vc=document.getElementById('victory-canvas');
-    const vctx=vc.getContext('2d');
-    const frame=this.victoryFrame++;
+  animateVictory(frame) {
+    if (!this.victoryActive) return;
+    const vc = document.getElementById('victory-canvas');
+    const vctx = vc.getContext('2d');
     vctx.clearRect(0,0,vc.width,vc.height);
-
-    // Background
-    vctx.fillStyle='#1a2e00';
-    vctx.fillRect(0,0,vc.width,vc.height);
-
-    // Buff Chicken walking across
-    const walkX=(frame*2)%(vc.width+200)-100;
-    const walkY=vc.height/2+20;
-    this.drawBuffChicken(vctx,walkX,walkY,frame);
-
-    if(this.victoryActive) requestAnimationFrame(()=>this.animateVictory());
+    vctx.fillStyle='#1a2e00'; vctx.fillRect(0,0,vc.width,vc.height);
+    const walkX = (frame*2.5)%(vc.width+200)-100;
+    this.draw2DBuffChicken(vctx, walkX, vc.height/2+20, frame);
+    requestAnimationFrame(() => this.animateVictory(frame+1));
   },
 
-  drawBuffChicken(vctx,x,y,frame){
-    const s=40;
-    const flexPhase=Math.floor(frame/30)%2;
-    vctx.save();
-    vctx.translate(x,y);
-
-    // Body
-    vctx.beginPath();
-    vctx.ellipse(0,0,s*1.2,s*1.3,0,0,TWO_PI);
-    vctx.fillStyle='#ffd700';
-    vctx.fill();
-    vctx.strokeStyle='#cc9900';
-    vctx.lineWidth=2;
-    vctx.stroke();
-
-    // Huge muscles
+  draw2DBuffChicken(vctx, x, y, frame) {
+    const s = 40, flex = Math.floor(frame/25)%2===1;
+    vctx.save(); vctx.translate(x,y);
+    vctx.beginPath(); vctx.ellipse(0,0,s*1.2,s*1.3,0,0,Math.PI*2); vctx.fillStyle='#ffd700'; vctx.fill();
     vctx.fillStyle='#ffaa00';
-    if(flexPhase===0){
-      vctx.beginPath(); vctx.ellipse(-s*1.3,-s*0.3,s*0.7,s*0.5,Math.PI*0.3,0,TWO_PI); vctx.fill();
-      vctx.beginPath(); vctx.ellipse(s*1.3,-s*0.3,s*0.7,s*0.5,-Math.PI*0.3,0,TWO_PI); vctx.fill();
+    if (flex) {
+      vctx.beginPath(); vctx.ellipse(-s*1.1,-s,s*0.7,s*0.5,Math.PI*0.7,0,Math.PI*2); vctx.fill();
+      vctx.beginPath(); vctx.ellipse( s*1.1,-s,s*0.7,s*0.5,-Math.PI*0.7,0,Math.PI*2); vctx.fill();
+      for(let i=0;i<6;i++){const a=(i/6)*Math.PI*2;vctx.beginPath();vctx.arc(Math.cos(a)*s*2,Math.sin(a)*s*2-30,4,0,Math.PI*2);vctx.fillStyle='#fff';vctx.fill();}
     } else {
-      // Flexing! Arms up
-      vctx.beginPath(); vctx.ellipse(-s*1.1,-s*1.0,s*0.7,s*0.5,Math.PI*0.7,0,TWO_PI); vctx.fill();
-      vctx.beginPath(); vctx.ellipse(s*1.1,-s*1.0,s*0.7,s*0.5,-Math.PI*0.7,0,TWO_PI); vctx.fill();
-      // Stars when flexing
-      vctx.fillStyle='#fff';
-      for(let i=0;i<5;i++){
-        const a=(i/5)*TWO_PI;
-        vctx.beginPath();
-        vctx.arc(Math.cos(a)*s*1.8,Math.sin(a)*s*1.8-40,4,0,TWO_PI);
-        vctx.fill();
-      }
+      vctx.beginPath(); vctx.ellipse(-s*1.3,-s*0.3,s*0.7,s*0.5,Math.PI*0.3,0,Math.PI*2); vctx.fill();
+      vctx.beginPath(); vctx.ellipse( s*1.3,-s*0.3,s*0.7,s*0.5,-Math.PI*0.3,0,Math.PI*2); vctx.fill();
     }
-
-    // Head
-    vctx.beginPath();
-    vctx.arc(s*0.6,-s*0.5,s*0.65,0,TWO_PI);
-    vctx.fillStyle='#ffd700';
-    vctx.fill();
-    // Comb
+    vctx.beginPath(); vctx.arc(s*0.6,-s*0.5,s*0.65,0,Math.PI*2); vctx.fillStyle='#ffd700'; vctx.fill();
     vctx.fillStyle='#e00';
-    for(let i=0;i<3;i++){
-      vctx.beginPath();
-      vctx.arc(s*0.4+i*12,-s*1.05,7,Math.PI,TWO_PI);
-      vctx.fill();
-    }
-    // Eye
-    vctx.fillStyle='#000';
-    vctx.beginPath(); vctx.arc(s*0.95,-s*0.5,4,0,TWO_PI); vctx.fill();
-    // Sunglasses
-    vctx.fillStyle='rgba(0,0,0,0.7)';
-    vctx.fillRect(s*0.7,-s*0.65,s*0.7,s*0.25);
-    vctx.strokeStyle='#222';
-    vctx.lineWidth=2;
-    vctx.strokeRect(s*0.7,-s*0.65,s*0.7,s*0.25);
-
-    // Legs (walking animation)
-    const legSwing=Math.sin(frame/8)*15;
+    for(let i=0;i<3;i++){vctx.beginPath();vctx.arc(s*0.3+i*14,-s*1.05,8,Math.PI,Math.PI*2);vctx.fill();}
+    vctx.fillStyle='rgba(0,0,0,0.7)'; vctx.fillRect(s*0.65,-s*0.68,s*0.75,s*0.28);
+    const sw=Math.sin(frame/7)*14;
     vctx.fillStyle='#ffaa00';
-    vctx.beginPath();
-    vctx.moveTo(-s*0.3,s*1.1);
-    vctx.lineTo(-s*0.3+legSwing,s*1.7);
-    vctx.lineTo(-s*0.1+legSwing,s*1.7);
-    vctx.lineTo(-s*0.1,s*1.1);
-    vctx.fill();
-    vctx.beginPath();
-    vctx.moveTo(s*0.1,s*1.1);
-    vctx.lineTo(s*0.1-legSwing,s*1.7);
-    vctx.lineTo(s*0.3-legSwing,s*1.7);
-    vctx.lineTo(s*0.3,s*1.1);
-    vctx.fill();
-
+    vctx.fillRect(-s*0.3+sw,s*1.1,s*0.2,s*0.65);
+    vctx.fillRect( s*0.1-sw,s*1.1,s*0.2,s*0.65);
     vctx.restore();
   },
 
-  // ---- Main Loop ----
-  loop(ts){
-    if(!this.running) return;
-    this.animId=requestAnimationFrame(t=>this.loop(t));
-    const dt=Math.min(ts-this.lastTime,50);
-    this.lastTime=ts;
-
-    this.update();
-    this.render();
+  // ── MSG / HUD ─────────────────────────────────────────────
+  msg(text, color='#fff') {
+    const el = document.createElement('div');
+    el.className='msg'; el.style.color=color; el.textContent=text;
+    this.msgEl.appendChild(el);
+    setTimeout(()=>el.remove(), 3300);
   },
 
-  update(){
-    const p=this.player;
-
-    // Player movement
-    let dx=0,dy=0;
-    if(keys['w']||keys['arrowup'])    dy=-1;
-    if(keys['s']||keys['arrowdown'])  dy=1;
-    if(keys['a']||keys['arrowleft'])  dx=-1;
-    if(keys['d']||keys['arrowright']) dx=1;
-    if(dx||dy){
-      const [nx,ny]=norm(dx,dy);
-      p.x+=nx*p.speed;
-      p.y+=ny*p.speed;
-      const sx=p.x-this.camera.x+canvas.width/2;
-      const sy=p.y-this.camera.y+canvas.height/2;
-      if(dx||dy) p.angle=Math.atan2(ny,nx);
+  updateHUD() {
+    const alive = this.chickens.filter(c=>!c.dead).length;
+    const eggCount = this.eggs.filter(e=>!e.dead).length;
+    document.getElementById('day-label').textContent = `Day ${this.day} / 100`;
+    document.getElementById('day-bar-fill').style.width = `${this.day}%`;
+    document.getElementById('hp-bar-fill').style.width  = `${(this.player.hp/this.player.maxHp)*100}%`;
+    document.getElementById('hp-text').textContent      = `${Math.ceil(this.player.hp)}/${this.player.maxHp}`;
+    for (const r of ALL_RUNES) {
+      const el = document.getElementById(`r-${r}`);
+      if (el) el.textContent = this.runes[r]||0;
     }
-    if(p.invincible>0) p.invincible--;
-    if(p.attackCooldown>0) p.attackCooldown--;
+    document.getElementById('chk-count').textContent = alive;
+    document.getElementById('egg-count').textContent = eggCount;
+    document.getElementById('area-name').textContent = ZONES[this.currentZone]?.label || 'The Farm';
+  },
 
-    // Camera follows player (smooth)
-    this.camera.x=lerp(this.camera.x,p.x,0.1);
-    this.camera.y=lerp(this.camera.y,p.y,0.1);
-
-    // Player points toward mouse even when idle
-    const sx=p.x-this.camera.x+canvas.width/2;
-    const sy=p.y-this.camera.y+canvas.height/2;
-    if(!dx&&!dy) p.angle=Math.atan2(mouseY-sy,mouseX-sx);
-
-    // Update chickens
-    for(const c of this.chickens){
-      if(!c.dead) c.update(p,this.enemies,this.projectiles);
+  // ── MAIN LOOP ─────────────────────────────────────────────
+  loop(ts) {
+    if (!this.running) {
+      renderer.render(this.activeScene || this.scenes.farm, camera);
+      this.animId = requestAnimationFrame(t => this.loop(t));
+      return;
     }
+    this.animId = requestAnimationFrame(t => this.loop(t));
+    this.update(ts);
+    this.renderFrame();
+  },
 
-    // Update eggs — auto-collect if player steps on them
-    for(const egg of this.eggs){
-      if(egg.dead) continue;
-      if(dist(p,egg)<20){
-        egg.dead=true;
-        const gender=Math.random()<0.5?'hen':'rooster';
-        const nc=new Chicken(egg.x,egg.y,gender);
-        this.chickens.push(nc);
-        this.msg(`Egg hatched into a ${gender}!`,'#ffe080');
-        this.updateHUD();
-      }
-    }
+  // ── UPDATE ────────────────────────────────────────────────
+  update(ts) {
+    const dt = Math.min(ts - this.lastTime, 50) / 16.67; // normalize to 60fps
+    this.lastTime = ts;
 
-    // Rune auto-pickup (walk over)
-    for(const rp of this.runePickups){
-      if(rp.dead) continue;
-      if(dist(p,rp)<20){
-        rp.dead=true;
-        this.runes[rp.type]++;
-        this.msg(`Picked up ${rp.type} rune!`,'#ffd700');
-        this.updateHUD();
-      }
+    const p = this.player;
+
+    // ── Player movement ──
+    const forward = new THREE.Vector3(-Math.sin(camYaw), 0, -Math.cos(camYaw));
+    const right   = new THREE.Vector3( Math.cos(camYaw), 0, -Math.sin(camYaw));
+    const move = new THREE.Vector3();
+    if (keys['w']||keys['arrowup'])    move.addScaledVector(forward, 1);
+    if (keys['s']||keys['arrowdown'])  move.addScaledVector(forward,-1);
+    if (keys['a']||keys['arrowleft'])  move.addScaledVector(right,  -1);
+    if (keys['d']||keys['arrowright']) move.addScaledVector(right,   1);
+
+    if (move.lengthSq() > 0) {
+      move.normalize().multiplyScalar(p.speed * dt);
+      p.pos.add(move);
+      p.facingYaw = Math.atan2(move.x, move.z);
+      p.mesh.rotation.y = p.facingYaw;
     }
 
-    // Update enemies
-    const activeEnemies=this.isBossFight?[]:(this.enemies.filter(e=>!e.dead));
-    for(const e of activeEnemies) e.update(p,this.projectiles);
-    if(this.boss&&!this.boss.dead) this.boss.update(p,this.projectiles);
+    // Bounds
+    const bounds = this.activeScene.userData.bounds || 85;
+    p.pos.x = Math.max(-bounds, Math.min(bounds, p.pos.x));
+    p.pos.z = Math.max(-bounds, Math.min(bounds, p.pos.z));
+    p.pos.y = 0;
+    p.mesh.position.copy(p.pos);
 
-    // Update projectiles
-    for(const proj of this.projectiles){
-      proj.update();
-      if(proj.dead) continue;
-      if(proj.owner==='enemy'||proj.owner==='chicken'){
-        if(proj.owner==='enemy'&&dist(proj,p)<p.size+proj.size){
-          proj.dead=true;
-          p.takeDamage(proj.dmg);
+    if (p.invincible > 0) { p.invincible--; p.mesh.visible = Math.floor(p.invincible/4)%2===0; }
+    else p.mesh.visible = true;
+    if (p.attackCooldown > 0) p.attackCooldown--;
+
+    // ── Portal check ──
+    const portals = this.activeScene.userData.portals || [];
+    for (const portal of portals) {
+      if (dist2D(p, {pos:{x:portal.x,z:portal.z}}) < portal.radius) {
+        if (portal.zone !== this.currentZone) {
+          this.enterZone(portal.zone);
+          return;
         }
       }
-      if(proj.owner==='player'||proj.owner==='chicken'){
-        // Hit enemies
-        for(const e of activeEnemies){
-          if(e.dead) continue;
-          if(dist(proj,e)<e.size+proj.size){
-            proj.dead=true;
-            const killed=e.takeDamage(proj.dmg);
-            if(killed) this.onEnemyKilled(e);
+    }
+
+    // ── Rune pickup (walk over) ──
+    for (const rp of this.runePickups) {
+      if (rp.dead || rp.mesh.parent !== this.activeScene) continue;
+      rp.mesh.rotation.y += 0.03;
+      rp.mesh.position.y = 0.5 + Math.sin(Date.now()/600 + rp.phase)*0.18;
+      if (dist2D(p, rp) < 1.5) {
+        rp.dead = true;
+        rp.mesh.parent.remove(rp.mesh);
+        this.runes[rp.type]++;
+        this.msg(`${RUNE_EMOJI[rp.type]} ${rp.type} rune collected!`, '#ffd700');
+        this.updateHUD();
+      }
+    }
+
+    // ── Egg walk-over ──
+    for (const egg of this.eggs) {
+      if (egg.dead) continue;
+      if (dist2D(p, egg) < 1.5) {
+        egg.dead = true;
+        egg.mesh.parent && egg.mesh.parent.remove(egg.mesh);
+        const gender = Math.random() < 0.5 ? 'hen' : 'rooster';
+        this.spawnChicken(gender, egg.pos.x, egg.pos.z);
+        this.msg(`Egg hatched: a ${gender}!`, '#ffe080');
+        this.updateHUD();
+      }
+    }
+
+    // ── Chicken update ──
+    const followingChickens = this.chickens.filter(c => !c.dead && c.following);
+    let followIdx = 0;
+    for (const c of this.chickens) {
+      if (c.dead) continue;
+
+      // Health regen: ~1 HP per 3 seconds (60fps → 1/180 per frame)
+      if (c.hp < c.maxHp) {
+        c.hpRegen += (dt / 180);
+        if (c.hpRegen >= 1) {
+          c.hp = Math.min(c.maxHp, c.hp + Math.floor(c.hpRegen));
+          c.hpRegen -= Math.floor(c.hpRegen);
+        }
+      }
+
+      // Only update chickens in current scene
+      if (c.mesh.parent !== this.activeScene) continue;
+
+      // Combat assist: target what player is targeting
+      let combatTarget = null;
+      if (c.transform && this.playerTarget && !this.playerTarget.dead && this.playerTarget.mesh.parent === this.activeScene) {
+        combatTarget = this.playerTarget;
+      }
+
+      if (combatTarget && c.following) {
+        // Move toward target
+        const d = dist2D(c, combatTarget);
+        const atkR = this.getChickenAtkRange(c);
+        if (d > atkR) {
+          const dx = combatTarget.pos.x - c.pos.x, dz = combatTarget.pos.z - c.pos.z;
+          const len = Math.sqrt(dx*dx+dz*dz)||1;
+          const spd = this.getChickenSpeed(c) * dt;
+          c.pos.x += (dx/len)*spd; c.pos.z += (dz/len)*spd;
+          c.mesh.rotation.y = Math.atan2(dx,dz);
+        }
+        // Attack
+        if (d <= atkR + combatTarget.size + 0.5 && c.attackCooldown <= 0) {
+          c.attackCooldown = 40;
+          const dmg = this.getChickenDmg(c);
+          if (this.getChickenProj(c)) {
+            const dx=combatTarget.pos.x-c.pos.x, dz=combatTarget.pos.z-c.pos.z;
+            const len=Math.sqrt(dx*dx+dz*dz)||1;
+            const col = c.transform==='air'?0x87CEEB:c.transform==='water'?0x4169E1:c.transform==='fire'?0xFF4500:0xffffff;
+            this.spawnProjectile(c.pos.clone().add(new THREE.Vector3(0,0.9,0)), new THREE.Vector3(dx/len,0,dz/len), 0.28, dmg, col, 'chicken');
+          } else {
+            this.damageEnemy(combatTarget, dmg);
+            if (combatTarget.dead && this.playerTarget === combatTarget) this.playerTarget = null;
+          }
+        }
+      } else if (c.following) {
+        // Follow player formation
+        const angle = (followIdx / Math.max(1,followingChickens.length)) * Math.PI*2 + Date.now()*0.0005;
+        const radius = 2.5 + Math.floor(followIdx/8)*1.5;
+        const targetX = p.pos.x + Math.cos(angle)*radius;
+        const targetZ = p.pos.z + Math.sin(angle)*radius + 2.5;
+        const dx = targetX-c.pos.x, dz = targetZ-c.pos.z;
+        const d = Math.sqrt(dx*dx+dz*dz);
+        if (d > 0.5) {
+          const spd = this.getChickenSpeed(c)*dt;
+          c.pos.x += (dx/d)*Math.min(spd,d);
+          c.pos.z += (dz/d)*Math.min(spd,d);
+          c.mesh.rotation.y = Math.atan2(dx,dz);
+        }
+        followIdx++;
+      } else {
+        // Wander
+        c.wanderTimer -= dt;
+        if (c.wanderTimer <= 0) {
+          c.wanderTimer = rndI(80,200);
+          c.wanderTarget.set(c.pos.x+rnd(-8,8), 0, c.pos.z+rnd(-8,8));
+        }
+        const dx=c.wanderTarget.x-c.pos.x, dz=c.wanderTarget.z-c.pos.z;
+        const d=Math.sqrt(dx*dx+dz*dz);
+        if (d > 0.6) {
+          c.pos.x += (dx/d)*0.05*dt;
+          c.pos.z += (dz/d)*0.05*dt;
+          c.mesh.rotation.y = Math.atan2(dx,dz);
+        }
+      }
+
+      // Animate walk (bob)
+      c.mesh.position.copy(c.pos);
+      c.mesh.position.y = Math.abs(Math.sin(Date.now()/180 + c.pos.x))*0.08;
+      if (c.attackCooldown > 0) c.attackCooldown--;
+    }
+
+    // ── Enemy update ──
+    for (const e of this.enemies) {
+      if (e.dead || e.mesh.parent !== this.activeScene) continue;
+      if (e.stunTime > 0) { e.stunTime--; continue; }
+
+      // Boss special phases
+      if (e.isBoss) {
+        if (e.hp < 1500 && e.phase===1){ e.phase=2; e.speed=0.055; e.dmg=45; this.msg('PHASE 2: "I\'ll turn you all into nuggets!"','#ff4400'); }
+        if (e.hp <  800 && e.phase===2){ e.phase=3; e.speed=0.07;  e.dmg=55; this.msg('PHASE 3: "NO MORE MISTER NICE FARMER!"','#ff0000'); }
+        // Boss triple shot
+        if (e.attackCooldown <= 0) {
+          e.attackCooldown = 48;
+          const dx=p.pos.x-e.pos.x, dz=p.pos.z-e.pos.z, l=Math.sqrt(dx*dx+dz*dz)||1;
+          for (const ao of [-0.3,0,0.3]) {
+            const ang = Math.atan2(dx,dz)+ao;
+            this.spawnProjectile(e.pos.clone().add(new THREE.Vector3(0,3,0)), new THREE.Vector3(Math.sin(ang),0,Math.cos(ang)), 0.22, e.dmg, 0xff4400, 'enemy');
+          }
+        }
+        if (e.specialCooldown <= 0) {
+          e.specialCooldown = 180;
+          for (let i=0;i<8;i++) {
+            const a=(i/8)*Math.PI*2;
+            this.spawnProjectile(e.pos.clone().add(new THREE.Vector3(0,2,0)), new THREE.Vector3(Math.sin(a),0,Math.cos(a)), 0.18, e.dmg*0.7, 0xff8800, 'enemy');
+          }
+          this.msg('Farmer Jim uses RING OF PITCHFORKS!','#ff6600');
+        }
+        e.specialCooldown--;
+      }
+
+      const d = dist2D(e, p);
+
+      // Aggro/chase
+      if (d < e.aggroRange) {
+        if (!e.isBoss && d > (e.atkRange || 3)) {
+          const dx=p.pos.x-e.pos.x, dz=p.pos.z-e.pos.z, l=Math.sqrt(dx*dx+dz*dz)||1;
+          e.pos.x += (dx/l)*e.speed*dt;
+          e.pos.z += (dz/l)*e.speed*dt;
+          e.mesh.rotation.y = Math.atan2(dx,dz);
+        } else if (e.isBoss && d > 8) {
+          const dx=p.pos.x-e.pos.x, dz=p.pos.z-e.pos.z, l=Math.sqrt(dx*dx+dz*dz)||1;
+          e.pos.x += (dx/l)*e.speed*dt;
+          e.pos.z += (dz/l)*e.speed*dt;
+          e.mesh.rotation.y = Math.atan2(dx,dz);
+        }
+
+        // Melee attack
+        if (e.attackCooldown <= 0 && d < (e.atkRange||3) + p.size) {
+          e.attackCooldown = 90;
+          if (e.ranged && !e.isBoss) {
+            const dx=p.pos.x-e.pos.x, dz=p.pos.z-e.pos.z, l=Math.sqrt(dx*dx+dz*dz)||1;
+            this.spawnProjectile(e.pos.clone().add(new THREE.Vector3(0,1,0)), new THREE.Vector3(dx/l,0,dz/l), 0.18, e.dmg, e.def?.col||0xff4400, 'enemy');
+          } else if (!e.ranged) {
+            p.hp -= e.dmg;
+            p.invincible = 30;
+            if (p.hp <= 0) { p.hp=0; p.dead=true; }
+          }
+        }
+      }
+
+      e.mesh.position.copy(e.pos);
+      if (e.attackCooldown > 0) e.attackCooldown--;
+    }
+
+    // ── Projectile update ──
+    for (const pr of this.projectiles) {
+      if (pr.dead || pr.mesh.parent !== this.activeScene) continue;
+      pr.pos.addScaledVector(pr.dir, pr.speed * dt);
+      pr.pos.y = pr.owner==='enemy' ? 1.0 : 1.1;
+      pr.mesh.position.copy(pr.pos);
+      pr.life -= dt;
+      if (pr.life <= 0) { pr.dead=true; pr.mesh.parent&&pr.mesh.parent.remove(pr.mesh); continue; }
+
+      // Hit detection
+      if (pr.owner==='enemy') {
+        if (dist2D(pr, p) < p.size + 0.3 && p.invincible<=0) {
+          pr.dead=true; pr.mesh.parent&&pr.mesh.parent.remove(pr.mesh);
+          p.hp -= pr.dmg; p.invincible=30;
+          if (p.hp<=0){p.hp=0;p.dead=true;}
+        }
+      } else {
+        for (const e of this.enemies) {
+          if (e.dead || e.mesh.parent !== this.activeScene) continue;
+          if (dist2D(pr,e) < e.size + 0.3) {
+            pr.dead=true; pr.mesh.parent&&pr.mesh.parent.remove(pr.mesh);
+            this.damageEnemy(e, pr.dmg);
             break;
           }
         }
-        if(this.boss&&!this.boss.dead&&dist(proj,this.boss)<this.boss.size+proj.size){
-          proj.dead=true;
-          this.boss.takeDamage(proj.dmg);
-          if(this.boss.hp<=0) this.triggerVictory();
-        }
       }
     }
-    // Prune dead
-    this.projectiles=this.projectiles.filter(pr=>!pr.dead);
-    this.enemies=this.enemies.filter(e=>!e.dead);
-    this.eggs=this.eggs.filter(e=>!e.dead);
-    this.runePickups=this.runePickups.filter(r=>!r.dead);
-    this.chickens=this.chickens.filter(c=>!c.dead);
 
-    // Game over?
-    if(p.dead){
-      this.running=false;
-      document.getElementById('go-text').textContent=`You survived ${this.day} days... Farmer Jim wins.`;
+    // Prune dead
+    this.enemies      = this.enemies.filter(e=>!e.dead);
+    this.runePickups  = this.runePickups.filter(r=>!r.dead);
+    this.projectiles  = this.projectiles.filter(pr=>!pr.dead);
+    this.eggs         = this.eggs.filter(e=>!e.dead);
+    this.chickens     = this.chickens.filter(c=>{
+      if (c.dead) { c.mesh.parent&&c.mesh.parent.remove(c.mesh); return false; }
+      return true;
+    });
+
+    // Player death
+    if (p.dead) {
+      this.running = false;
+      document.getElementById('go-text').textContent = `You survived ${this.day} days... Farmer Jim wins.`;
       document.getElementById('gameover-screen').classList.remove('hidden');
     }
 
-    this.detectArea();
-    if(Math.random()<0.02) this.updateHUD();
+    if (Math.random() < 0.05) this.updateHUD();
   },
 
-  render(){
-    ctx.clearRect(0,0,canvas.width,canvas.height);
-
-    const cx=this.camera.x, cy=this.camera.y;
-    const toScreen=(wx,wy)=>[wx-cx+canvas.width/2, wy-cy+canvas.height/2];
-
-    // Sky/ground color based on day/area
-    let skyColor='#1a3a1a';
-    if(this.isBossFight) skyColor='#3a0a00';
-    else if(this.currentArea==='beach') skyColor='#1a3a4a';
-    else if(this.currentArea==='volcano') skyColor='#3a1a0a';
-    else if(this.currentArea==='mountain') skyColor='#2a2a3a';
-    else if(this.currentArea==='gym') skyColor='#2a1a3a';
-    ctx.fillStyle=skyColor;
-    ctx.fillRect(0,0,canvas.width,canvas.height);
-
-    // Ground grid (farm)
-    this.drawGround(cx,cy);
-
-    // Farm objects
-    for(const obj of this.farmObjects){
-      const [sx,sy]=toScreen(obj.x,obj.y);
-      if(sx<-100||sx>canvas.width+100||sy<-100||sy>canvas.height+100) continue;
-      this.drawFarmObject(ctx,obj.type,sx,sy);
-    }
-
-    // Rune pickups
-    for(const rp of this.runePickups){
-      const [sx,sy]=toScreen(rp.x,rp.y);
-      if(Math.abs(sx-canvas.width/2)<canvas.width/2+50 && Math.abs(sy-canvas.height/2)<canvas.height/2+50){
-        rp.draw(sx,sy);
-      }
-    }
-
-    // Eggs
-    for(const egg of this.eggs){
-      const [sx,sy]=toScreen(egg.x,egg.y);
-      egg.draw(sx,sy);
-    }
-
-    // Chickens
-    for(const c of this.chickens){
-      const [sx,sy]=toScreen(c.x,c.y);
-      if(Math.abs(sx-canvas.width/2)<canvas.width/2+100 && Math.abs(sy-canvas.height/2)<canvas.height/2+100){
-        c.draw(sx,sy);
-      }
-    }
-
-    // Enemies
-    for(const e of this.enemies){
-      const [sx,sy]=toScreen(e.x,e.y);
-      if(Math.abs(sx-canvas.width/2)<canvas.width/2+100 && Math.abs(sy-canvas.height/2)<canvas.height/2+100){
-        e.draw(sx,sy);
-      }
-    }
-
-    // Boss
-    if(this.boss&&!this.boss.dead){
-      const [sx,sy]=toScreen(this.boss.x,this.boss.y);
-      this.boss.draw(sx,sy);
-    }
-
-    // Projectiles
-    for(const proj of this.projectiles){
-      const [sx,sy]=toScreen(proj.x,proj.y);
-      proj.draw(sx,sy);
-    }
-
-    // Player
-    const [psx,psy]=toScreen(this.player.x,this.player.y);
-    this.player.draw(psx,psy);
-
-    // Attack range indicator (faint)
-    if(mouseDown){
-      ctx.beginPath();
-      ctx.arc(psx,psy,this.player.atkRange,0,TWO_PI);
-      ctx.strokeStyle='rgba(136,204,255,0.15)';
-      ctx.lineWidth=1;
-      ctx.stroke();
-    }
-
-    // Area markers (when near edge of visible farm)
-    this.drawAreaMarkers(toScreen);
-
-    // Boss intro sky
-    if(this.isBossFight&&this.boss){
-      // Red vignette
-      const grad=ctx.createRadialGradient(canvas.width/2,canvas.height/2,100,canvas.width/2,canvas.height/2,canvas.width*0.7);
-      grad.addColorStop(0,'transparent');
-      grad.addColorStop(1,'rgba(100,0,0,0.35)');
-      ctx.fillStyle=grad;
-      ctx.fillRect(0,0,canvas.width,canvas.height);
-    }
-
-    // Minimap update
-    if(!document.getElementById('minimap-panel').classList.contains('hidden')){
-      this.drawMinimap();
-    }
+  // ── Chicken stat helpers ───────────────────────────────────
+  getChickenSpeed(c) {
+    let s = c.transform ? CHK_XFORM[c.transform].baseSpd : 0.07;
+    s *= (1 + c.buffLevel*0.1);
+    if (c.specialUpgrades.sand) s *= (1 + c.specialUpgrades.sand*0.35);
+    return s;
+  },
+  getChickenDmg(c) {
+    let d = c.transform ? CHK_XFORM[c.transform].baseDmg : 8;
+    d *= (1 + c.buffLevel*0.3);
+    if (c.specialUpgrades.lava) d *= (1 + c.specialUpgrades.lava*0.5);
+    return d;
+  },
+  getChickenAtkRange(c) {
+    return c.transform ? CHK_XFORM[c.transform].atkR : 2.5;
+  },
+  getChickenProj(c) {
+    return c.transform ? CHK_XFORM[c.transform].proj : false;
   },
 
-  drawGround(cx,cy){
-    const tileSize=80;
-    const startX=Math.floor((cx-canvas.width/2)/tileSize)*tileSize;
-    const startY=Math.floor((cy-canvas.height/2)/tileSize)*tileSize;
+  // ── RENDER ────────────────────────────────────────────────
+  renderFrame() {
+    // Camera orbit around player
+    const p = this.player;
+    const cx = p.pos.x + Math.sin(camYaw)*CAM_DIST*Math.cos(camPitch);
+    const cy = p.pos.y + Math.sin(camPitch)*CAM_DIST;
+    const cz = p.pos.z + Math.cos(camYaw)*CAM_DIST*Math.cos(camPitch);
+    camera.position.lerp(new THREE.Vector3(cx,cy,cz), 0.1);
+    camera.lookAt(p.pos.x, p.pos.y + CAM_LOOK_H, p.pos.z);
 
-    for(let wx=startX;wx<cx+canvas.width/2+tileSize;wx+=tileSize){
-      for(let wy=startY;wy<cy+canvas.height/2+tileSize;wy+=tileSize){
-        const sx=wx-cx+canvas.width/2;
-        const sy=wy-cy+canvas.height/2;
+    // Animate rune pickups
+    // (done in update)
 
-        // Color based on proximity to areas
-        let col='#2a4a1a';
-        for(const [key,area] of Object.entries(AREAS)){
-          if(key==='farm') continue;
-          const d=Math.sqrt((wx-area.x)**2+(wy-area.y)**2);
-          if(d<AREA_RADIUS){
-            const t=1-d/AREA_RADIUS;
-            if(key==='beach') col=`rgba(180,160,80,${t*0.8})`;
-            else if(key==='volcano') col=`rgba(120,40,10,${t*0.8})`;
-            else if(key==='mountain') col=`rgba(80,80,80,${t*0.8})`;
-            else if(key==='gym') col=`rgba(80,50,20,${t*0.8})`;
-          }
-        }
-
-        ctx.fillStyle='#2a4a1a';
-        ctx.fillRect(sx,sy,tileSize+1,tileSize+1);
-        if(col!=='#2a4a1a'){
-          ctx.fillStyle=col;
-          ctx.fillRect(sx,sy,tileSize+1,tileSize+1);
-        }
-
-        // Grass tufts
-        if((Math.abs(wx)+Math.abs(wy))%160===0){
-          ctx.fillStyle='#1a3a10';
-          ctx.fillRect(sx+10,sy+10,3,8);
-          ctx.fillRect(sx+14,sy+8,3,10);
-          ctx.fillRect(sx+18,sy+12,3,6);
-        }
-      }
-    }
-  },
-
-  drawFarmObject(ctx,type,sx,sy){
-    switch(type){
-      case 'barn':
-        // Barn structure
-        ctx.fillStyle='#8B2500';
-        ctx.fillRect(sx-40,sy-30,80,50);
-        ctx.fillStyle='#cc3300';
-        ctx.beginPath();
-        ctx.moveTo(sx-50,sy-30);
-        ctx.lineTo(sx,sy-70);
-        ctx.lineTo(sx+50,sy-30);
-        ctx.fill();
-        ctx.fillStyle='#4a1a00';
-        ctx.fillRect(sx-15,sy,30,20);
-        ctx.fillStyle='#ffcc00';
-        ctx.font='14px serif';
-        ctx.textAlign='center';
-        ctx.fillText('🐔',sx,sy-40);
-        break;
-      case 'fence':
-        ctx.fillStyle='#8B6914';
-        ctx.fillRect(sx-4,sy-15,8,25);
-        ctx.fillRect(sx-12,sy-8,24,5);
-        break;
-      case 'tree':
-        ctx.beginPath();
-        ctx.arc(sx,sy,18,0,TWO_PI);
-        ctx.fillStyle='#1a5a10';
-        ctx.fill();
-        ctx.fillStyle='#2a7a20';
-        ctx.beginPath();
-        ctx.arc(sx-5,sy-8,12,0,TWO_PI);
-        ctx.fill();
-        ctx.fillStyle='#5a3010';
-        ctx.fillRect(sx-4,sy+10,8,14);
-        break;
-      case 'hay':
-        ctx.fillStyle='#c8a020';
-        ctx.beginPath();
-        ctx.ellipse(sx,sy,20,14,0,0,TWO_PI);
-        ctx.fill();
-        ctx.strokeStyle='#8B6914';
-        ctx.lineWidth=2;
-        ctx.stroke();
-        break;
-      case 'gym_sign':
-      case 'beach_sign':
-      case 'mtn_sign':
-      case 'volcano_sign': {
-        const label={gym_sign:'🏋️ GYM',beach_sign:'🏖️ BEACH',mtn_sign:'⛰️ MOUNTAIN',volcano_sign:'🌋 VOLCANO'}[type];
-        const areaKey={gym_sign:'gym',beach_sign:'beach',mtn_sign:'mountain',volcano_sign:'volcano'}[type];
-        const locked=!this.unlockedAreas[areaKey];
-        ctx.fillStyle=locked?'rgba(80,40,40,0.9)':'rgba(40,80,40,0.9)';
-        ctx.fillRect(sx-50,sy-24,100,28);
-        ctx.strokeStyle=locked?'#880000':'#00aa00';
-        ctx.lineWidth=2;
-        ctx.strokeRect(sx-50,sy-24,100,28);
-        ctx.fillStyle='#fff';
-        ctx.font='bold 13px sans-serif';
-        ctx.textAlign='center';
-        ctx.fillText((locked?'🔒 ':'')+label,sx,sy-4);
-        // Post
-        ctx.fillStyle='#5a3010';
-        ctx.fillRect(sx-3,sy+4,6,30);
-        break;
-      }
-    }
-  },
-
-  drawAreaMarkers(toScreen){
-    for(const [key,area] of Object.entries(AREAS)){
-      if(key==='farm'||!this.unlockedAreas[key]) continue;
-      const [sx,sy]=toScreen(area.x,area.y);
-      // Only draw if off-screen (show arrow)
-      if(sx>=0&&sx<=canvas.width&&sy>=0&&sy<=canvas.height) continue;
-      const angle=Math.atan2(area.y-this.player.y,area.x-this.player.x);
-      const arrowX=canvas.width/2+Math.cos(angle)*Math.min(canvas.width/2-40,Math.abs(area.x-this.player.x));
-      const arrowY=canvas.height/2+Math.sin(angle)*Math.min(canvas.height/2-40,Math.abs(area.y-this.player.y));
-      const clampedX=Math.max(30,Math.min(canvas.width-30,canvas.width/2+Math.cos(angle)*300));
-      const clampedY=Math.max(30,Math.min(canvas.height-30,canvas.height/2+Math.sin(angle)*220));
-      ctx.save();
-      ctx.translate(clampedX,clampedY);
-      ctx.rotate(angle);
-      ctx.fillStyle='rgba(0,255,100,0.8)';
-      ctx.beginPath();
-      ctx.moveTo(12,0); ctx.lineTo(-8,-7); ctx.lineTo(-8,7);
-      ctx.fill();
-      ctx.restore();
-      ctx.fillStyle='rgba(0,255,100,0.8)';
-      ctx.font='10px sans-serif';
-      ctx.textAlign='center';
-      ctx.fillText(area.label,clampedX,clampedY+18);
-    }
+    renderer.render(this.activeScene, camera);
   },
 };
 
-// Expose to HTML onclick
+// Expose Game to HTML
 window.Game = G;
 
-// Auto-start loop (but don't start the game, wait for button)
-// Just ensure canvas is sized correctly
-canvas.width=window.innerWidth;
-canvas.height=window.innerHeight;
+// Start rendering immediately (shows title screen backdrop)
+G.scenes = {};
+G.scenes.farm = buildFarmScene();
+G.activeScene = G.scenes.farm;
+G.player = { pos: new THREE.Vector3(0,0,0), mesh: makePlayerMesh(), hp:100, maxHp:100, invincible:0 };
+G.player.mesh.position.copy(G.player.pos);
+G.activeScene.add(G.player.mesh);
+camera.position.set(0, 8, 13);
+camera.lookAt(0, 1.4, 0);
+
+// Idle render loop (before game starts)
+(function idleRender(ts) {
+  if (!G.running) {
+    renderer.render(G.activeScene, camera);
+    requestAnimationFrame(idleRender);
+  }
+})(0);
