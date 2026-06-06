@@ -1704,10 +1704,11 @@ const G = {
       // Only update chickens in current scene
       if (c.mesh.parent !== this.activeScene) continue;
 
-      // Combat assist: target what player is targeting
+      // Combat assist: ALL following chickens attack whatever the player is attacking
       let combatTarget = null;
-      if (c.transform && this.playerTarget && !this.playerTarget.dead && this.playerTarget.mesh.parent === this.activeScene) {
-        combatTarget = this.playerTarget;
+      const assistTarget = this.playerTarget || this.lockedTarget;
+      if (c.following && assistTarget && !assistTarget.dead && assistTarget.mesh.parent === this.activeScene) {
+        combatTarget = assistTarget;
       }
 
       if (combatTarget && c.following) {
@@ -1903,7 +1904,7 @@ const G = {
 
   // ── Chicken stat helpers ───────────────────────────────────
   getChickenSpeed(c) {
-    let s = c.transform ? CHK_XFORM[c.transform].baseSpd : 0.07;
+    let s = c.transform ? CHK_XFORM[c.transform].baseSpd : 0.20;
     s *= (1 + c.buffLevel*0.1);
     if (c.specialUpgrades.sand) s *= (1 + c.specialUpgrades.sand*0.35);
     return s;
